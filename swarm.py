@@ -85,7 +85,7 @@ class PSO(Swarm):
             num_particles = 10,
             c1 = 2.0, # personal # TODO is this correct?
             c2 = 2.0, # global
-            inertia = 0.1,
+            inertia = 0.2,
         ):
         super(PSO, self).__init__(params, num_particles)
 
@@ -101,16 +101,16 @@ class PSO(Swarm):
         return torch.argmin(self.pbests_y)
 
     def update_swarm(self):
-        # for i in range(self.N):
-        #     curr_loss = self.current_losses[i]
-        #     if curr_loss < self.pbests_y[i]:
-        #         self.pbests_y[i] = curr_loss
-        torch.where(
-            self.current_losses < self.pbests_y,
-            self.current_losses,
-            self.pbests_y,
-            out=self.pbests_y
-        )
+        for i in range(self.N):
+            curr_loss = self.current_losses[i]
+            if curr_loss < self.pbests_y[i]:
+                self.pbests_y[i] = curr_loss
+        # torch.where(
+        #     self.current_losses < self.pbests_y,
+        #     self.current_losses,
+        #     self.pbests_y,
+        #     out=self.pbests_y
+        # )
         best_idx = self.get_best()
 
         Vpers = self.pbests_x - self.X
@@ -128,9 +128,9 @@ class SwarmGrad(Swarm):
             self,
             params,
             num_particles = 10,
-            c1 = 4.1, # 0.08 unnormed
+            c1 = 6.1, # 0.08 unnormed
             c2 = 0.0,
-            inertia = 0.1,
+            inertia = 0.0,
             neg_slope = 0.1,
         ):
         super(SwarmGrad, self).__init__(params, num_particles)
@@ -168,9 +168,11 @@ class SwarmGrad(Swarm):
         Vrnd = r2 * self.c2
         Vinr = self.inertia * self.V
 
-        self.V = Vref + Vrnd # + Vinr
+        self.V = Vref + Vrnd + Vinr
         self.X += self.V
 
+        avgV = torch.mean(torch.linalg.norm(self.V, dim=-1))
+        print(f"Avg V={avgV}")
 
 
 class SwarmGradAccel(Swarm):
@@ -178,10 +180,10 @@ class SwarmGradAccel(Swarm):
             self,
             params,
             num_particles = 10,
-            c1 = 4.0, # 0.08 unnormed
-            c2 = 0.0,
+            c1 = 0.02, # 0.08 unnormed
+            c2 = 0., # 0.005,
             inertia = 0.9,
-            beta = 0.99,
+            beta = 0.999,
             neg_slope = 0.1,
         ):
         super(SwarmGradAccel, self).__init__(params, num_particles)
@@ -227,13 +229,19 @@ class SwarmGradAccel(Swarm):
         vthat = A/(1-self.beta**t)
 
         # learning rate schedule; should be managed by a scheduler TODO
-        schedule_weight = 1/(1-self.inertia**t)
+        # schedule_weight = 1/(1-self.inertia**t)
+        schedule_weight = 1
 
         update = schedule_weight * self.c1 * r1 * (mthat / (torch.sqrt(vthat) + 1e-6)) + Vrnd
 
         self.A = A
         self.V = V
-        self.X += self.V
+        self.X += update
+
+        avgV = torch.mean(torch.linalg.norm(update, dim=-1))
+        print(f"Avg V={avgV}")
+        avgA = torch.mean(torch.linalg.norm(A, dim=-1))
+        print(f"Avg A={avgA}")
 
         self.t += 1
 
