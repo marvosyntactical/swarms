@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torchvision import datasets, transforms
 import contextlib
 
-from swarm import Swarm, PSO, SwarmGrad, SwarmGradAccel, CBO
+from swarm import Swarm, PSO, SwarmGrad, SwarmGradAccel, CBO, EGICBO
 
 
 GRADIENT = 0 # use zeroth order optim (swarm) or 1st order optim (adam) ?
@@ -16,7 +16,8 @@ else:
     # Optim = PSO
     # Optim = SwarmGrad
     # Optim = SwarmGradAccel
-    Optim = CBO
+    # Optim = CBO
+    Optim = EGICBO
 
     N = 10
 

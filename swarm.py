@@ -83,15 +83,15 @@ class PSO(Swarm):
             self,
             params,
             num_particles = 10,
-            c1 = 2.0, # personal # TODO is this correct?
-            c2 = 2.0, # global
-            inertia = 0.1,
+            c1 = 1.5, # personal # TODO is this correct?
+            c2 = 0.5, # global
+            inertia = 0.2,
         ):
         super(PSO, self).__init__(params, num_particles)
 
         self.pbests_x = self.X
         self.pbests_y = torch.Tensor([float("inf") for _ in range(self.N)])
-        self.V = torch.empty_like(self.X)
+        self.V = torch.zeros_like(self.X)
 
         self.c1 = c1 # personal
         self.c2 = c2 # global
@@ -113,8 +113,8 @@ class PSO(Swarm):
         Vpers = self.pbests_x - self.X
         Vglob = self.pbests_x[best_idx].unsqueeze(0) - self.X
 
-        r1 = torch.rand(Vpers.shape)
-        r2 = torch.rand(Vglob.shape)
+        r1 = torch.rand(*Vpers.shape)
+        r2 = torch.rand(*Vglob.shape)
 
         self.V = r1 * self.c1 * Vpers + r2 * self.c2 * Vglob + self.inertia * self.V
         self.X += self.V
@@ -134,7 +134,7 @@ class SwarmGrad(Swarm):
         ):
         super(SwarmGrad, self).__init__(params, num_particles)
 
-        self.V = torch.empty_like(self.X)
+        self.V = torch.zeros_like(self.X)
 
         self.perm = list(range(self.N))
 
@@ -187,8 +187,8 @@ class SwarmGradAccel(Swarm):
         ):
         super(SwarmGradAccel, self).__init__(params, num_particles)
 
-        self.V = torch.empty_like(self.X)
-        self.A = torch.empty_like(self.X)
+        self.V = torch.zeros_like(self.X)
+        self.A = torch.zeros_like(self.X)
 
         self.perm = list(range(self.N))
 
@@ -252,15 +252,15 @@ class CBO(Swarm):
             self,
             params,
             num_particles = 10,
-            drift = 1.0, # drift
-            diff = 1.0, # diff
-            temp = 10.0,
+            lambda_ = 1.0, # drift
+            sigma = 1.0, # diff
+            temp = 30.0,
             noise_type = "component"
         ):
         super(CBO, self).__init__(params, num_particles)
 
-        self.lambda_ = drift # drift
-        self.sigma = diff # diff
+        self.lambda_ = lambda_ # drift
+        self.sigma = sigma # diff
         self.temp = temp
 
         self.noise_type = noise_type
@@ -288,7 +288,6 @@ class CBO(Swarm):
             # proportional to norm
             diffusion = torch.linalg.norm(drift,dim=-1).unsqueeze(1) * B
 
-
         V = self.lambda_ * drift + self.sigma * diffusion
 
         self.X += V
@@ -297,8 +296,134 @@ class CBO(Swarm):
         print(f"Avg V={avgV}")
 
 
-class CBS(Swarm):
-    pass
+class EGICBO(Swarm):
+    def __init__(
+            self,
+            params,
+            num_particles = 10,
+            lambda_ = 1.0, # drift
+            sigma = 0.9, # diff
+            kappa = 5.5,
+            slack = 0.4,
+            tau = 0.8,
+            temp = 10.0,
+            extrapolate = False, # Use Hessian?
+            noise_type = "component"
+        ):
+        super(EGICBO, self).__init__(params, num_particles)
+
+        self.lambda_ = lambda_ # drift
+        self.sigma = sigma # diff
+        self.temp = temp
+        self.kappa = kappa
+        self.slack = slack
+        self.tau = tau
+
+        self.extrapolate = extrapolate
+
+        self.noise_type = noise_type
+
+        # first particle serves as mean
+        self.X[0] = torch.mean(self.X[1:], dim=0)
+
+    def get_softmax(self):
+        weights = torch.Tensor([torch.exp(-self.temp * self.current_losses[i]) for i in range(self.N)])
+        denominator = torch.sum(weights)
+        num = torch.zeros_like(self.X[0])
+        for i in range(self.N):
+            addition = self.X[i] * weights[i]
+            num += addition
+        return num/(denominator + 1e-6)
+
+    def grad_and_hessian(self, idx=0):
+        """
+        adapted from official implementation at
+        https://github.com/MercuryBench/ensemble-based-gradient/blob/main/grad_inference.py
+        """
+        X = self.X - self.X[idx].unsqueeze(0)
+        Y = self.current_losses - self.current_losses[idx]
+
+        Z = X.clone()
+        Xnorms_short = torch.linalg.norm(X, dim=-1)
+        Xnorms = Xnorms_short.unsqueeze(-1).expand(X.shape)
+        torch.where(
+            Xnorms != 0,
+            X/Xnorms,
+            torch.zeros_like(X),
+            out=Z
+        )
+        mat1 = X @ Z.T
+
+        hadamard = .5 * mat1**2
+        mat = torch.cat([mat1, hadamard], dim=-1)
+
+        b = torch.zeros_like(Y)
+        divisor_b = 0.5**2*Xnorms_short**3 + self.slack
+        torch.where(
+            divisor_b != 0,
+            Y/divisor_b,
+            b,
+            out=b
+        )
+
+        A = torch.zeros_like(mat)
+        divisor_A = (torch.tile(0.5**2*(Xnorms_short**3), (2*self.N, 1)) + self.slack).T
+        torch.where(
+            divisor_A != 0,
+            mat/divisor_A,
+            A,
+            out=A,
+        )
+
+        # Least Squares
+        u = torch.linalg.lstsq(A,b)[0] # NOTE: Try scipy lsmr, faster apparently?
+
+        assert u.shape[0] == 2 * self.N, u.shape
+
+        G = Z.T @ u[0:self.N]
+
+        coeffs_hess = u[self.N:]
+        # Cannot allocate memory:
+        # H = torch.einsum('i,ki,li->kl', coeffs_hess, Z.T, Z.T)
+        H = coeffs_hess * mat1 # is this correct?
+
+        return G, H
+
+
+    def update_swarm(self):
+
+        G, H = self.grad_and_hessian(idx=0)
+
+        g = G.unsqueeze(0)
+        if self.extrapolate:
+            g += H @ (self.X-self.X[0].unsqueeze(0))
+
+        softmax = self.get_softmax()
+
+        drift = softmax.unsqueeze(0) - self.X
+
+        B = torch.randn(*drift.shape)
+
+        if self.noise_type == "component":
+            # componentwise
+            diffusion = drift * B
+        else:
+            # proportional to norm
+            diffusion = torch.linalg.norm(drift,dim=-1).unsqueeze(1) * B
+
+        V = self.tau * self.lambda_ * drift \
+            - self.tau * self.kappa * g \
+            + self.tau**.5 * self.sigma * diffusion
+
+        self.X += V
+
+        avgV = torch.mean(torch.linalg.norm(V, dim=-1))
+
+        # first particle serves as mean
+        self.X[0] = torch.mean(self.X[1:], dim=0)
+
+
+
 
 
 def main(args):
