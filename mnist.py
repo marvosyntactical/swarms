@@ -14,8 +14,8 @@ if GRADIENT:
 else:
     # Optim = Swarm
     # Optim = PSO
-    Optim = SwarmGrad
-    # Optim = SwarmGradAccel
+    # Optim = SwarmGrad
+    Optim = SwarmGradAccel
 
     N = 10
 

@@ -223,7 +223,7 @@ class SwarmGradAccel(Swarm):
 
         # Adam like update
         V = self.inertia * self.V + (1-self.inertia) * Vref
-        A = self.beta * self.A + (1-self.beta) * V**2
+        A = self.beta * self.A + (1-self.beta) * Vref**2
 
         mthat = V/(1-self.inertia**t)
         vthat = A/(1-self.beta**t)
