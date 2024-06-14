@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torchvision import datasets, transforms
 import contextlib
 
-from swarm import Swarm, PSO, SwarmGrad, SwarmGradAccel
+from swarm import Swarm, PSO, SwarmGrad, SwarmGradAccel, CBO
 
 
 GRADIENT = 0 # use zeroth order optim (swarm) or 1st order optim (adam) ?
@@ -15,11 +15,11 @@ else:
     # Optim = Swarm
     # Optim = PSO
     # Optim = SwarmGrad
-    Optim = SwarmGradAccel
+    # Optim = SwarmGradAccel
+    Optim = CBO
 
     N = 10
 
-# Define the CNN architecture
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()

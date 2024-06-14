@@ -85,7 +85,7 @@ class PSO(Swarm):
             num_particles = 10,
             c1 = 2.0, # personal # TODO is this correct?
             c2 = 2.0, # global
-            inertia = 0.2,
+            inertia = 0.1,
         ):
         super(PSO, self).__init__(params, num_particles)
 
@@ -101,16 +101,13 @@ class PSO(Swarm):
         return torch.argmin(self.pbests_y)
 
     def update_swarm(self):
+        # NOTE: This could be done with torch.where
         for i in range(self.N):
             curr_loss = self.current_losses[i]
             if curr_loss < self.pbests_y[i]:
                 self.pbests_y[i] = curr_loss
-        # torch.where(
-        #     self.current_losses < self.pbests_y,
-        #     self.current_losses,
-        #     self.pbests_y,
-        #     out=self.pbests_y
-        # )
+                self.pbests_x[i] = self.X[i]
+
         best_idx = self.get_best()
 
         Vpers = self.pbests_x - self.X
@@ -122,6 +119,8 @@ class PSO(Swarm):
         self.V = r1 * self.c1 * Vpers + r2 * self.c2 * Vglob + self.inertia * self.V
         self.X += self.V
 
+        avgV = torch.mean(torch.linalg.norm(self.V, dim=-1))
+        print(f"Avg V={avgV}")
 
 class SwarmGrad(Swarm):
     def __init__(
@@ -180,10 +179,10 @@ class SwarmGradAccel(Swarm):
             self,
             params,
             num_particles = 10,
-            c1 = 0.02, # 0.08 unnormed
+            c1 = 0.04, # 0.08 unnormed
             c2 = 0., # 0.005,
             inertia = 0.9,
-            beta = 0.999,
+            beta = 0.9,
             neg_slope = 0.1,
         ):
         super(SwarmGradAccel, self).__init__(params, num_particles)
@@ -240,16 +239,63 @@ class SwarmGradAccel(Swarm):
 
         avgV = torch.mean(torch.linalg.norm(update, dim=-1))
         print(f"Avg V={avgV}")
+        Vavg = torch.linalg.norm(torch.mean(update, dim=0))
+        print(f"V Avg={Vavg}")
         avgA = torch.mean(torch.linalg.norm(A, dim=-1))
         print(f"Avg A={avgA}")
 
         self.t += 1
 
 
-
-
 class CBO(Swarm):
-    pass
+    def __init__(
+            self,
+            params,
+            num_particles = 10,
+            drift = 1.0, # drift
+            diff = 1.0, # diff
+            temp = 10.0,
+            noise_type = "component"
+        ):
+        super(CBO, self).__init__(params, num_particles)
+
+        self.lambda_ = drift # drift
+        self.sigma = diff # diff
+        self.temp = temp
+
+        self.noise_type = noise_type
+
+    def get_softmax(self):
+        weights = torch.Tensor([torch.exp(-self.temp * self.current_losses[i]) for i in range(self.N)])
+        denominator = torch.sum(weights)
+        num = torch.zeros_like(self.X[0])
+        for i in range(self.N):
+            addition = self.X[i] * weights[i]
+            num += addition
+        return num/(denominator + 1e-6)
+
+    def update_swarm(self):
+        softmax = self.get_softmax()
+
+        drift = softmax.unsqueeze(0) - self.X
+
+        B = torch.randn(*drift.shape)
+
+        if self.noise_type == "component":
+            # componentwise
+            diffusion = drift * B
+        else:
+            # proportional to norm
+            diffusion = torch.linalg.norm(drift,dim=-1).unsqueeze(1) * B
+
+
+        V = self.lambda_ * drift + self.sigma * diffusion
+
+        self.X += V
+
+        avgV = torch.mean(torch.linalg.norm(V, dim=-1))
+        print(f"Avg V={avgV}")
+
 
 class CBS(Swarm):
     pass
