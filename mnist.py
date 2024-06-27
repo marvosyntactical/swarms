@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torchvision import datasets, transforms
 import contextlib
 
-from swarm import Swarm, PSO, SwarmGrad, SwarmGradAccel, CBO, EGICBO
+from swarm import Swarm, PSO, SwarmGrad, SwarmGradAccel, CBO, EGICBO, PlanarSwarm
 
 
 GRADIENT = 0 # use zeroth order optim (swarm) or 1st order optim (adam) ?
@@ -12,14 +12,14 @@ GRADIENT = 0 # use zeroth order optim (swarm) or 1st order optim (adam) ?
 if GRADIENT:
     Optim = torch.optim.Adam
 else:
-    # Optim = Swarm
     # Optim = PSO
     # Optim = SwarmGrad
     # Optim = SwarmGradAccel
     # Optim = CBO
     Optim = EGICBO
+    # Optim = PlanarSwarm
 
-    N = 10
+    N = 3
 
 class Net(nn.Module):
     def __init__(self):

@@ -85,7 +85,7 @@ class PSO(Swarm):
             num_particles = 10,
             c1 = 1.5, # personal # TODO is this correct?
             c2 = 0.5, # global
-            inertia = 0.2,
+            inertia = 0.1,
         ):
         super(PSO, self).__init__(params, num_particles)
 
@@ -127,7 +127,7 @@ class SwarmGrad(Swarm):
             self,
             params,
             num_particles = 10,
-            c1 = 6.1, # 0.08 unnormed
+            c1 = 0.05, # 0.08 unnormed
             c2 = 0.0,
             inertia = 0.0,
             neg_slope = 0.1,
@@ -179,10 +179,10 @@ class SwarmGradAccel(Swarm):
             self,
             params,
             num_particles = 10,
-            c1 = 0.04, # 0.08 unnormed
-            c2 = 0., # 0.005,
+            c1 = 0.1, # 0.08 unnormed
+            c2 = 0.0, # 0.005,
             inertia = 0.9,
-            beta = 0.9,
+            beta = 0.99,
             neg_slope = 0.1,
         ):
         super(SwarmGradAccel, self).__init__(params, num_particles)
@@ -252,8 +252,8 @@ class CBO(Swarm):
             self,
             params,
             num_particles = 10,
-            lambda_ = 1.0, # drift
-            sigma = 1.0, # diff
+            lambda_ = 0.9, # drift
+            sigma = 0.5, # diff
             temp = 30.0,
             noise_type = "component"
         ):
@@ -301,12 +301,12 @@ class EGICBO(Swarm):
             self,
             params,
             num_particles = 10,
-            lambda_ = 1.0, # drift
-            sigma = 0.9, # diff
-            kappa = 5.5,
-            slack = 0.4,
-            tau = 0.8,
-            temp = 10.0,
+            lambda_ = 0.9, # drift
+            sigma = 0.5, # diff
+            kappa = 1000.0,
+            slack = 0.0,
+            tau = 0.2,
+            temp = 30.0,
             extrapolate = False, # Use Hessian?
             noise_type = "component"
         ):
@@ -340,6 +340,8 @@ class EGICBO(Swarm):
         adapted from official implementation at
         https://github.com/MercuryBench/ensemble-based-gradient/blob/main/grad_inference.py
         """
+
+        # FIXME TODO NOTE something is wrong with the Gradient calc
         X = self.X - self.X[idx].unsqueeze(0)
         Y = self.current_losses - self.current_losses[idx]
 
@@ -352,13 +354,15 @@ class EGICBO(Swarm):
             torch.zeros_like(X),
             out=Z
         )
-        mat1 = X @ Z.T
+        mat1 = X @ Z.T # FIXME this is correctly N x N, but in Alg 1, Line 4 they imply d x N?
 
         hadamard = .5 * mat1**2
         mat = torch.cat([mat1, hadamard], dim=-1)
 
+        gamma_base = 0.5**2*Xnorms_short**3
+
         b = torch.zeros_like(Y)
-        divisor_b = 0.5**2*Xnorms_short**3 + self.slack
+        divisor_b = gamma_base + self.slack
         torch.where(
             divisor_b != 0,
             Y/divisor_b,
@@ -367,7 +371,7 @@ class EGICBO(Swarm):
         )
 
         A = torch.zeros_like(mat)
-        divisor_A = (torch.tile(0.5**2*(Xnorms_short**3), (2*self.N, 1)) + self.slack).T
+        divisor_A = (torch.tile(gamma_base, (2*self.N, 1)) + self.slack).T
         torch.where(
             divisor_A != 0,
             mat/divisor_A,
@@ -382,21 +386,32 @@ class EGICBO(Swarm):
 
         G = Z.T @ u[0:self.N]
 
-        coeffs_hess = u[self.N:]
-        # Cannot allocate memory:
-        # H = torch.einsum('i,ki,li->kl', coeffs_hess, Z.T, Z.T)
-        H = coeffs_hess * mat1 # is this correct?
+        if self.extrapolate:
+            coeffs_hess = u[self.N:]
+            # Cannot allocate memory:
+            print([t.shape for t in [coeffs_hess, X]])
+            # NOTE: This is too memory inefficient:
+            # H = torch.einsum('i,ki,li->kl', coeffs_hess, X.T, X.T)
 
-        return G, H
+            # NOTE: This is too computationally expensive as well
+            # TODO: Block diagonal apprxn of hessian, i.e. layerwise
+            hu = torch.einsum('i,ki,li,ji->kj', coeffs_hess, Z.T, Z.T, X.T)
+
+            # H = coeffs_hess * mat1 # this is wrong?
+        else:
+            hu =  ...
+
+        return G, hu
 
 
     def update_swarm(self):
 
-        G, H = self.grad_and_hessian(idx=0)
+        G, hu = self.grad_and_hessian(idx=0)
 
         g = G.unsqueeze(0)
         if self.extrapolate:
-            g += H @ (self.X-self.X[0].unsqueeze(0))
+            # g += H @ (self.X-self.X[0].unsqueeze(0))
+            g += hu
 
         softmax = self.get_softmax()
 
@@ -418,12 +433,44 @@ class EGICBO(Swarm):
         self.X += V
 
         avgV = torch.mean(torch.linalg.norm(V, dim=-1))
+        print(f"Avg V={avgV}")
+        print(f"G    ={torch.linalg.norm(G)}")
 
         # first particle serves as mean
         self.X[0] = torch.mean(self.X[1:], dim=0)
 
 
 
+class PlanarSwarm(Swarm):
+    def __init__(
+            self,
+            params,
+            num_particles = 10,
+        ):
+        super(PlanarSwarm, self).__init__(params, num_particles)
+
+
+    def update_swarm(self):
+
+        XtX = self.X.T @ self.X # <-- out of memory
+        beta0 = torch.linalg.inv(XtX)
+        beta1 =  beta0 @ self.X.T
+        beta = beta1 @ self.current_losses
+
+        # Extract the bias term and the coefficients
+        # bias = theta[0]
+        coefficients = theta[1:]
+
+        # Compute the standard deviation of each feature
+        std_dev = torch.std(self.X, dim=0)
+
+        # Scale the coefficients inversely proportional to the standard deviation
+        scaled_coefficients = coefficients / std_dev
+
+        # Compute the modified direction of steepest descent
+        steepest_descent_direction = -scaled_coefficients / torch.norm(scaled_coefficients)
+
+        self.X += steepest_descent_direction.unsqueeze(0)
 
 
 def main(args):
