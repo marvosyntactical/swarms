@@ -1,12 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 from torchvision import datasets, transforms
 
-import torch.optim as optim
-
 from typing import Union, Iterable, Dict, Any, Callable
+
 import random
+from scipy.sparse.linalg import svds
+import numpy as np
 
 # For Debugging
 f = lambda t: (t.isnan().sum()/t.nelement()).item()
@@ -17,7 +19,7 @@ class Swarm(optim.Optimizer):
             params: Union[Iterable[torch.Tensor], Iterable[Dict[str, Any]]],
             num_particles: int = 10,
             init_type: str = "gauss",
-            var: float = 0.1,
+            var: float = 1.0,
         ):
         defaults = dict(num_particles=num_particles)
         super(Swarm, self).__init__(params, defaults)
@@ -68,7 +70,6 @@ class Swarm(optim.Optimizer):
                 loss = closure()
                 current_losses.append(loss)
 
-
             self.current_losses = torch.Tensor(current_losses)
             self.update_swarm()
 
@@ -77,6 +78,10 @@ class Swarm(optim.Optimizer):
             nn.utils.vector_to_parameters(self.X[best_particle_idx], self.param_groups[0]['params'])
 
         return self.current_losses.mean()
+
+    def stats(self):
+        return {}
+
 
 class PSO(Swarm):
     def __init__(
@@ -119,17 +124,20 @@ class PSO(Swarm):
         self.V = r1 * self.c1 * Vpers + r2 * self.c2 * Vglob + self.inertia * self.V
         self.X += self.V
 
-        avgV = torch.mean(torch.linalg.norm(self.V, dim=-1))
-        print(f"Avg V={avgV}")
+    def stats(self):
+        avgV = torch.mean(torch.linalg.norm(self.V, dim=-1)).item()
+
+        return {"avg_v_norm": avgV}
+
 
 class SwarmGrad(Swarm):
     def __init__(
             self,
             params,
             num_particles = 10,
-            c1 = 0.05, # 0.08 unnormed
+            c1 = 80.0, # 0.08 unnormed
             c2 = 0.0,
-            inertia = 0.0,
+            inertia = 0.1,
             neg_slope = 0.1,
         ):
         super(SwarmGrad, self).__init__(params, num_particles)
@@ -170,8 +178,11 @@ class SwarmGrad(Swarm):
         self.V = Vref + Vrnd + Vinr
         self.X += self.V
 
-        avgV = torch.mean(torch.linalg.norm(self.V, dim=-1))
-        print(f"Avg V={avgV}")
+
+    def stats(self):
+        avgV = torch.mean(torch.linalg.norm(self.V, dim=-1)).item()
+
+        return {"avg_v_norm": avgV}
 
 
 class SwarmGradAccel(Swarm):
@@ -179,10 +190,10 @@ class SwarmGradAccel(Swarm):
             self,
             params,
             num_particles = 10,
-            c1 = 0.1, # 0.08 unnormed
-            c2 = 0.0, # 0.005,
-            inertia = 0.9,
-            beta = 0.99,
+            c1 = 1., # 0.08 unnormed
+            c2 = 0., # 0.005,
+            beta1 = 0.9,
+            beta2 = 0.99,
             neg_slope = 0.1,
         ):
         super(SwarmGradAccel, self).__init__(params, num_particles)
@@ -195,8 +206,8 @@ class SwarmGradAccel(Swarm):
         self.c1 = c1
         self.c2 = c2
         self.neg_slope = neg_slope
-        self.inertia = inertia
-        self.beta = beta
+        self.beta1 = beta1
+        self.beta2 = beta2
 
         self.t = 1
 
@@ -221,14 +232,14 @@ class SwarmGradAccel(Swarm):
         Vrnd = r2 * self.c2
 
         # Adam like update
-        V = self.inertia * self.V + (1-self.inertia) * Vref
-        A = self.beta * self.A + (1-self.beta) * Vref**2
+        V = self.beta1 * self.V + (1-self.beta1) * Vref
+        A = self.beta2 * self.A + (1-self.beta2) * Vref**2
 
-        mthat = V/(1-self.inertia**t)
-        vthat = A/(1-self.beta**t)
+        mthat = V/(1-self.beta1**t)
+        vthat = A/(1-self.beta2**t)
 
         # learning rate schedule; should be managed by a scheduler TODO
-        # schedule_weight = 1/(1-self.inertia**t)
+        # schedule_weight = 1/(1-self.beta1**t)
         schedule_weight = 1
 
         update = schedule_weight * self.c1 * r1 * (mthat / (torch.sqrt(vthat) + 1e-6)) + Vrnd
@@ -237,14 +248,16 @@ class SwarmGradAccel(Swarm):
         self.V = V
         self.X += update
 
-        avgV = torch.mean(torch.linalg.norm(update, dim=-1))
-        print(f"Avg V={avgV}")
-        Vavg = torch.linalg.norm(torch.mean(update, dim=0))
-        print(f"V Avg={Vavg}")
-        avgA = torch.mean(torch.linalg.norm(A, dim=-1))
-        print(f"Avg A={avgA}")
 
         self.t += 1
+
+    def stats(self):
+        avgV = torch.mean(torch.linalg.norm(self.V, dim=-1)).item()
+        avgA = torch.mean(torch.linalg.norm(self.A, dim=-1)).item()
+
+        return {"avg_v_norm": avgV, "avg_a_norm": avgA}
+
+
 
 
 class CBO(Swarm):
@@ -252,8 +265,8 @@ class CBO(Swarm):
             self,
             params,
             num_particles = 10,
-            lambda_ = 0.9, # drift
-            sigma = 0.5, # diff
+            lambda_ = 1.5, # drift
+            sigma = 0.8, # diff
             temp = 30.0,
             noise_type = "component"
         ):
@@ -290,10 +303,14 @@ class CBO(Swarm):
 
         V = self.lambda_ * drift + self.sigma * diffusion
 
+        self.V = V
         self.X += V
 
-        avgV = torch.mean(torch.linalg.norm(V, dim=-1))
-        print(f"Avg V={avgV}")
+
+    def stats(self):
+        avgV = torch.mean(torch.linalg.norm(self.V, dim=-1)).item()
+
+        return {"avg_v_norm": avgV}
 
 
 class EGICBO(Swarm):
@@ -303,8 +320,8 @@ class EGICBO(Swarm):
             num_particles = 10,
             lambda_ = 0.9, # drift
             sigma = 0.5, # diff
-            kappa = 1000.0,
-            slack = 0.0,
+            kappa = 100000.0,
+            slack = 10,
             tau = 0.2,
             temp = 30.0,
             extrapolate = False, # Use Hessian?
@@ -388,8 +405,9 @@ class EGICBO(Swarm):
 
         if self.extrapolate:
             coeffs_hess = u[self.N:]
+
             # Cannot allocate memory:
-            print([t.shape for t in [coeffs_hess, X]])
+            # print([t.shape for t in [coeffs_hess, X]])
             # NOTE: This is too memory inefficient:
             # H = torch.einsum('i,ki,li->kl', coeffs_hess, X.T, X.T)
 
@@ -432,16 +450,25 @@ class EGICBO(Swarm):
 
         self.X += V
 
-        avgV = torch.mean(torch.linalg.norm(V, dim=-1))
-        print(f"Avg V={avgV}")
-        print(f"G    ={torch.linalg.norm(G)}")
-
         # first particle serves as mean
         self.X[0] = torch.mean(self.X[1:], dim=0)
+
+        # save these for stats
+        self.V = V
+        self.Gnorm = torch.linalg.norm(G).item()
+
+
+    def stats(self):
+        avgV = torch.mean(torch.linalg.norm(self.V, dim=-1)).item()
+        return {
+            "avg_v_norm": avgV,
+            "g_norm": self.Gnorm
+        }
 
 
 
 class PlanarSwarm(Swarm):
+
     def __init__(
             self,
             params,
@@ -451,30 +478,22 @@ class PlanarSwarm(Swarm):
 
 
     def update_swarm(self):
+        U, s, Vt = svds(self.X.numpy(), k=self.N-1)
 
-        XtX = self.X.T @ self.X # <-- out of memory
-        beta0 = torch.linalg.inv(XtX)
-        beta1 =  beta0 @ self.X.T
-        beta = beta1 @ self.current_losses
+        idx = np.argsort(s)
+        s = s[idx]
+        Vt = Vt[idx]
 
-        # Extract the bias term and the coefficients
-        # bias = theta[0]
-        coefficients = theta[1:]
+        down = Vt[-1]
+        down /= np.linalg.norm(down)
 
-        # Compute the standard deviation of each feature
-        std_dev = torch.std(self.X, dim=0)
+        V = 10* torch.Tensor(down).unsqueeze(0)
 
-        # Scale the coefficients inversely proportional to the standard deviation
-        scaled_coefficients = coefficients / std_dev
-
-        # Compute the modified direction of steepest descent
-        steepest_descent_direction = -scaled_coefficients / torch.norm(scaled_coefficients)
-
-        self.X += steepest_descent_direction.unsqueeze(0)
+        self.V = V
+        self.X += V
 
 
 def main(args):
-    ...
     return 0
 
 if __name__ == "__main__":
