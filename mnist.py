@@ -26,9 +26,9 @@ class SmallLinear(nn.Module):
         x = F.log_softmax(x, dim=1)
         return x
 
-class Net(nn.Module):
+class ConvNet(nn.Module):
     def __init__(self):
-        super(Net, self).__init__()
+        super(ConvNet, self).__init__()
         self.conv1 = nn.Conv2d(1, 32, 3, 1)
         self.conv2 = nn.Conv2d(32, 64, 3, 1)
         self.dropout1 = nn.Dropout2d(0.25)
@@ -107,6 +107,7 @@ def parse_args():
     # SGA
     parser.add_argument("--beta1", type=float, default=0.9, help="Beta1 Hyperparam of SGA")
     parser.add_argument("--beta2", type=float, default=0.99, help="Beta2 Hyperparam of SGA")
+    parser.add_argument("--lr", type=float, default=1.0, help="Optional learning rate of SGA")
 
     # CBO
     parser.add_argument("--lamda", type=float, default=1.5, help="Lambda Hyperparam of CBO")
@@ -146,23 +147,27 @@ def main(args):
 
     if args.neptune:
         run = init_neptune(args)
+    else:
+        run = {}
 
 
     # Initialize the model and optimizer
-    model = SmallLinear()
 
     if args.gradient:
+        model = SmallLinear()
         optimizer = torch.optim.Adam(
             model.parameters(),
             lr=0.01,
         )
 
     else:
+        models = [SmallLinear() for _ in range(args.N)]
+        model = models[0]
+
         opt = args.optim
         if opt == "cbo":
             optimizer = CBO(
-                model.parameters(),
-                num_particles=args.N,
+                models,
                 lambda_=args.lamda,
                 sigma=args.sigma,
                 noise_type=args.noise
@@ -173,8 +178,7 @@ def main(args):
 
         elif opt == "pso":
             optimizer = PSO(
-                model.parameters(),
-                num_particles=args.N,
+                models,
                 c1=args.c1,
                 c2=args.c2,
                 inertia=args.inertia,
@@ -185,8 +189,7 @@ def main(args):
 
         elif opt == "egi":
             optimizer = EGICBO(
-                model.parameters(),
-                num_particles=args.N,
+                models,
                 lambda_=args.lamda,
                 sigma=args.sigma,
                 noise_type=args.noise,
@@ -204,8 +207,7 @@ def main(args):
 
         elif opt == "sg":
             optimizer = SwarmGrad(
-                model.parameters(),
-                num_particles=args.N,
+                models,
                 c1=args.c1,
                 c2=args.c2,
                 inertia=args.inertia,
@@ -216,12 +218,12 @@ def main(args):
 
         elif opt == "sga":
             optimizer = SwarmGradAccel(
-                model.parameters(),
-                num_particles=args.N,
+                models,
                 c1=args.c1,
                 c2=args.c2,
                 beta1=args.beta1,
-                beta2=args.beta2
+                beta2=args.beta2,
+                lr=args.lr,
             )
             run["parameters/c1"] = args.c1
             run["parameters/c2"] = args.c2
@@ -231,10 +233,8 @@ def main(args):
 
         elif opt == "pla":
             optimizer = PlanarSwarm(
-                model.parameters(),
-                num_particles=args.N,
+                models,
             )
-
         else:
             raise NotImplementedError(f"Optim={opt}")
 
@@ -263,7 +263,13 @@ def main(args):
 
                     optimizer.step()
                 else:
-                    loss = optimizer.step(lambda: F.nll_loss(model(data), target))
+                    loss = optimizer.step(
+                        F.nll_loss,
+                        model,
+                        data,
+                        target
+                        # lambda: F.nll_loss(model(data), target)
+                    )
 
                     if args.neptune:
                         for stat, val in optimizer.stats().items():
@@ -282,15 +288,15 @@ def main(args):
             model.eval()
             test_loss = 0
             correct = 0
-            with torch.no_grad():
-                for data, target in test_loader:
-                    output = model(data)
-                    test_loss += F.nll_loss(output, target, reduction='sum').item()
-                    pred = output.argmax(dim=1, keepdim=True)
-                    correct += pred.eq(target.view_as(pred)).sum().item()
 
-                # Sanity Check: To see if net just learned to output one digit always
-                pprint(freqs(pred))
+            for data, target in test_loader:
+                output = model(data)
+                test_loss += F.nll_loss(output, target, reduction='sum').item()
+                pred = output.argmax(dim=1, keepdim=True)
+                correct += pred.eq(target.view_as(pred)).sum().item()
+
+            # Sanity Check: To see if net just learned to output one digit always
+            pprint(freqs(pred))
 
             test_loss /= len(test_loader.dataset)
             accuracy = 100. * correct / len(test_loader.dataset)

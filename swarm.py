@@ -4,11 +4,14 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms
 
-from typing import Union, Iterable, Dict, Any, Callable
+from typing import Union, Iterable, Dict, Any, Callable, Optional
+from collections import OrderedDict
 
 import random
 from scipy.sparse.linalg import svds
 import numpy as np
+
+from torch.func import vmap, functional_call, stack_module_state
 
 # For Debugging
 f = lambda t: (t.isnan().sum()/t.nelement()).item()
@@ -16,32 +19,46 @@ f = lambda t: (t.isnan().sum()/t.nelement()).item()
 class Swarm(optim.Optimizer):
     def __init__(
             self,
-            params: Union[Iterable[torch.Tensor], Iterable[Dict[str, Any]]],
-            num_particles: int = 10,
+            models: Iterable[nn.Module],
             init_type: str = "gauss",
             var: float = 1.0,
+            device: torch.device = "cpu",
+            parallel: bool = True,
         ):
+        self.X = self._initialize_particles(models, device=device)
+        self.pprop = self._get_pprops(models)
+
+        num_particles = len(models)
+
         defaults = dict(num_particles=num_particles)
-        super(Swarm, self).__init__(params, defaults)
+        super(Swarm, self).__init__(models[0].parameters(), defaults)
 
         self.N = num_particles
 
-        # N x dim(model)
-        self.X = self._initialize_particles(init_type, var)
+        self.parallel = parallel
 
-    def _initialize_particles(self, init_type="gauss", var=0.1):
-        X = [[] for _ in range(self.N)]
-        for param in self.param_groups[0]["params"]:
+    def _initialize_particles(self, models: Iterable[nn.Module], device: torch.device="cpu"):
+        # adapted from https://github.com/PdIPS/CBXpy/blob/main/cbx/utils/torch_utils.py
+        pnames = [p[0] for p in models[0].named_parameters()]
+        params, buffers = stack_module_state(models)
 
-            # TODO other init distributions
-            if init_type == "gauss":
-                param_copies = torch.randn(self.N, *param.shape) * var + param.unsqueeze(0)
+        N = list(params.values())[-1].shape[0]
+        X = torch.concatenate([params[pname].view(N,-1).detach() for pname in pnames], dim=-1)
+        X = X.to(device)
+        return X
 
-            for i in range(self.N):
-                X[i].append(param_copies[i].view(-1))
-        for i in range(self.N):
-            X[i] = torch.cat(X[i])
-        return torch.stack(X)
+    def _get_pprops(self, models: Iterable[nn.Module]):
+        # adapted from https://github.com/PdIPS/CBXpy/blob/main/cbx/utils/torch_utils.py
+        params, buffers = stack_module_state(models)
+        pnames = [p[0] for p in models[0].named_parameters()]
+        pprop = OrderedDict()
+        for p in pnames:
+            a = 0
+            if len(pprop)>0:
+                a = pprop[next(reversed(pprop))][-1]
+            pprop[p] = (params[p][0,...].shape, a, a + params[p][0,...].numel())
+        return pprop
+
 
     def get_best(self):
         """
@@ -58,26 +75,51 @@ class Swarm(optim.Optimizer):
         raise NotImplementedError
 
 
-    def step(self, closure=Callable):
+    def step(self,
+            loss_func: Optional[Callable] = None,
+            model: Optional[nn.Module] = None,
+            x: Optional[torch.Tensor] = None,
+            y: Optional[torch.Tensor] = None,
+            closure: Optional[Callable] = None
+        ):
+
         with torch.no_grad():
-            current_losses = []
-            for i in range(self.N):
 
-                # Swap in this particle for model parameters
-                nn.utils.vector_to_parameters(self.X[i], self.param_groups[0]['params'])
+            if self.parallel:
+                required = loss_func, model, x, y
+                assert None not in required, required
 
-                # Compute loss for this particle
-                loss = closure()
-                current_losses.append(loss)
+                def get_loss(inp, X):
+                    pprop = self.pprop
+                    params = {p: X[pprop[p][-2]:pprop[p][-1]].view(pprop[p][0]) for p in pprop}
+                    pred = functional_call(model, (params, {}), inp)
+                    loss = loss_func(pred, y)
+                    return loss
 
-            self.current_losses = torch.Tensor(current_losses)
+                get_losses = vmap(get_loss, (None, 0))
+
+                self.current_losses = get_losses(x, self.X)
+
+            else:
+                current_losses = []
+                for i in range(self.N):
+
+                    # Swap in this particle for model parameters
+                    nn.utils.vector_to_parameters(self.X[i], self.param_groups[0]['params'])
+
+                    # Compute loss for this particle
+                    loss = closure()
+                    current_losses.append(loss)
+
+                self.current_losses = torch.Tensor(current_losses)
+
             self.update_swarm()
 
-            # Update the model parameters with the best particle
+            # Update the model (models[0]) parameters with the best particle
             best_particle_idx = self.get_best()
             nn.utils.vector_to_parameters(self.X[best_particle_idx], self.param_groups[0]['params'])
 
-        return self.current_losses.mean()
+        return self.current_losses.min()
 
     def stats(self):
         return {}
@@ -195,6 +237,7 @@ class SwarmGradAccel(Swarm):
             beta1 = 0.9,
             beta2 = 0.99,
             neg_slope = 0.1,
+            lr = 1.0,
         ):
         super(SwarmGradAccel, self).__init__(params, num_particles)
 
@@ -208,6 +251,8 @@ class SwarmGradAccel(Swarm):
         self.neg_slope = neg_slope
         self.beta1 = beta1
         self.beta2 = beta2
+
+        self.lr = lr
 
         self.t = 1
 
@@ -238,11 +283,7 @@ class SwarmGradAccel(Swarm):
         mthat = V/(1-self.beta1**t)
         vthat = A/(1-self.beta2**t)
 
-        # learning rate schedule; should be managed by a scheduler TODO
-        # schedule_weight = 1/(1-self.beta1**t)
-        schedule_weight = 1
-
-        update = schedule_weight * self.c1 * r1 * (mthat / (torch.sqrt(vthat) + 1e-6)) + Vrnd
+        update = self.lr * self.c1 * r1 * (mthat / (torch.sqrt(vthat) + 1e-6)) + Vrnd
 
         self.A = A
         self.V = V
@@ -250,6 +291,9 @@ class SwarmGradAccel(Swarm):
 
 
         self.t += 1
+        # if self.t % 100 == 0:
+        #     self.lr += .5
+        #     print(f"learning rate is now {self.lr}")
 
     def stats(self):
         avgV = torch.mean(torch.linalg.norm(self.V, dim=-1)).item()
