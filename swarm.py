@@ -119,7 +119,7 @@ class PSO(Swarm):
         super(PSO, self).__init__(models, device)
 
         self.pbests_x = self.X
-        self.pbests_y = torch.Tensor([float("inf") for _ in range(self.N)])
+        self.pbests_y = torch.Tensor([float("inf") for _ in range(self.N)]).to(self.X.device)
         self.V = torch.zeros_like(self.X)
 
         self.c1 = c1 # personal
@@ -142,8 +142,8 @@ class PSO(Swarm):
         Vpers = self.pbests_x - self.X
         Vglob = self.pbests_x[best_idx].unsqueeze(0) - self.X
 
-        r1 = torch.rand(*Vpers.shape)
-        r2 = torch.rand(*Vglob.shape)
+        r1 = torch.rand(*Vpers.shape).to(self.X.device)
+        r2 = torch.rand(*Vglob.shape).to(self.X.device)
 
         self.V = r1 * self.c1 * Vpers + r2 * self.c2 * Vglob + self.inertia * self.V
         self.X += self.V
@@ -192,8 +192,8 @@ class SwarmGrad(Swarm):
         fdiff = fdiff.unsqueeze(-1)
         # print(f"fd%: {f(fdiff)}")
 
-        r1 = torch.rand(*H.shape) # U[0,1]
-        r2 = torch.randn(*H.shape) # N(0,1)
+        r1 = torch.rand(*H.shape).to(self.X.device) # U[0,1]
+        r2 = torch.randn(*H.shape).to(self.X.device) # N(0,1)
 
         Vref = r1 * self.c1 * fdiff * H
         Vrnd = r2 * self.c2
@@ -252,8 +252,8 @@ class SwarmGradAccel(Swarm):
         F.leaky_relu(fdiff, negative_slope=self.neg_slope, inplace=True)
         fdiff.unsqueeze_(-1)
 
-        r1 = torch.rand(*H.shape) # U[0,1]
-        r2 = torch.randn(*H.shape) # N(0,1)
+        r1 = torch.rand(*H.shape).to(self.X.device) # U[0,1]
+        r2 = torch.randn(*H.shape).to(self.X.device) # N(0,1)
 
         Vref = fdiff * H
         Vrnd = r2 * self.c2
@@ -270,7 +270,6 @@ class SwarmGradAccel(Swarm):
         self.A = A
         self.V = V
         self.X += update
-
 
         self.t += 1
         # if self.t % 100 == 0:
@@ -305,7 +304,7 @@ class CBO(Swarm):
         self.noise_type = noise_type
 
     def get_softmax(self):
-        weights = torch.Tensor([torch.exp(-self.temp * self.current_losses[i]) for i in range(self.N)])
+        weights = torch.Tensor([torch.exp(-self.temp * self.current_losses[i]) for i in range(self.N)]).to(self.X.device)
         denominator = torch.sum(weights)
         num = torch.zeros_like(self.X[0])
         for i in range(self.N):
@@ -318,7 +317,7 @@ class CBO(Swarm):
 
         drift = softmax.unsqueeze(0) - self.X
 
-        B = torch.randn(*drift.shape)
+        B = torch.randn(*drift.shape).to(self.X.device)
 
         if self.noise_type == "component":
             # componentwise
@@ -370,7 +369,7 @@ class EGICBO(Swarm):
         self.X[0] = torch.mean(self.X[1:], dim=0)
 
     def get_softmax(self):
-        weights = torch.Tensor([torch.exp(-self.temp * self.current_losses[i]) for i in range(self.N)])
+        weights = torch.Tensor([torch.exp(-self.temp * self.current_losses[i]) for i in range(self.N)]).to(self.X.device)
         denominator = torch.sum(weights)
         num = torch.zeros_like(self.X[0])
         for i in range(self.N):
@@ -461,7 +460,7 @@ class EGICBO(Swarm):
 
         drift = softmax.unsqueeze(0) - self.X
 
-        B = torch.randn(*drift.shape)
+        B = torch.randn(*drift.shape).to(self.X.device)
 
         if self.noise_type == "component":
             # componentwise
@@ -513,7 +512,7 @@ class PlanarSwarm(Swarm):
         down = Vt[-1]
         down /= np.linalg.norm(down)
 
-        V = 10* torch.Tensor(down).unsqueeze(0)
+        V = 10* torch.Tensor(down).to(self.X.device).unsqueeze(0)
 
         self.V = V
         self.X += V
