@@ -30,6 +30,7 @@ class Swarm(optim.Optimizer):
         super(Swarm, self).__init__(models[0].parameters(), defaults)
 
         self.X = self._initialize_particles(models, device=device)
+        self.pprop = self._get_pprops(models)
 
 
     def _initialize_particles(self, models: Iterable[nn.Module], device: torch.device="cpu"):
