@@ -20,22 +20,17 @@ class Swarm(optim.Optimizer):
     def __init__(
             self,
             models: Iterable[nn.Module],
-            init_type: str = "gauss",
-            var: float = 1.0,
             device: torch.device = "cpu",
-            parallel: bool = True,
         ):
-        self.X = self._initialize_particles(models, device=device)
-        self.pprop = self._get_pprops(models)
 
         num_particles = len(models)
+        self.N = num_particles
 
         defaults = dict(num_particles=num_particles)
         super(Swarm, self).__init__(models[0].parameters(), defaults)
 
-        self.N = num_particles
+        self.X = self._initialize_particles(models, device=device)
 
-        self.parallel = parallel
 
     def _initialize_particles(self, models: Iterable[nn.Module], device: torch.device="cpu"):
         # adapted from https://github.com/PdIPS/CBXpy/blob/main/cbx/utils/torch_utils.py
@@ -85,33 +80,19 @@ class Swarm(optim.Optimizer):
 
         with torch.no_grad():
 
-            if self.parallel:
-                required = loss_func, model, x, y
-                assert None not in required, required
+            required = loss_func, model, x, y
+            assert None not in required, required
 
-                def get_loss(inp, X):
-                    pprop = self.pprop
-                    params = {p: X[pprop[p][-2]:pprop[p][-1]].view(pprop[p][0]) for p in pprop}
-                    pred = functional_call(model, (params, {}), inp)
-                    loss = loss_func(pred, y)
-                    return loss
+            def get_loss(inp, X):
+                pprop = self.pprop
+                params = {p: X[pprop[p][-2]:pprop[p][-1]].view(pprop[p][0]) for p in pprop}
+                pred = functional_call(model, (params, {}), inp)
+                loss = loss_func(pred, y)
+                return loss
 
-                get_losses = vmap(get_loss, (None, 0))
+            get_losses = vmap(get_loss, (None, 0))
 
-                self.current_losses = get_losses(x, self.X)
-
-            else:
-                current_losses = []
-                for i in range(self.N):
-
-                    # Swap in this particle for model parameters
-                    nn.utils.vector_to_parameters(self.X[i], self.param_groups[0]['params'])
-
-                    # Compute loss for this particle
-                    loss = closure()
-                    current_losses.append(loss)
-
-                self.current_losses = torch.Tensor(current_losses)
+            self.current_losses = get_losses(x, self.X)
 
             self.update_swarm()
 
@@ -128,13 +109,13 @@ class Swarm(optim.Optimizer):
 class PSO(Swarm):
     def __init__(
             self,
-            params,
-            num_particles = 10,
+            models: Iterable[nn.Module],
             c1 = 1.5, # personal # TODO is this correct?
             c2 = 0.5, # global
             inertia = 0.1,
+            device: torch.device = "cpu",
         ):
-        super(PSO, self).__init__(params, num_particles)
+        super(PSO, self).__init__(models, device)
 
         self.pbests_x = self.X
         self.pbests_y = torch.Tensor([float("inf") for _ in range(self.N)])
@@ -175,14 +156,14 @@ class PSO(Swarm):
 class SwarmGrad(Swarm):
     def __init__(
             self,
-            params,
-            num_particles = 10,
+            models: Iterable[nn.Module],
             c1 = 80.0, # 0.08 unnormed
             c2 = 0.0,
             inertia = 0.1,
             neg_slope = 0.1,
+            device: torch.device = "cpu",
         ):
-        super(SwarmGrad, self).__init__(params, num_particles)
+        super(SwarmGrad, self).__init__(models, device)
 
         self.V = torch.zeros_like(self.X)
 
@@ -230,16 +211,16 @@ class SwarmGrad(Swarm):
 class SwarmGradAccel(Swarm):
     def __init__(
             self,
-            params,
-            num_particles = 10,
+            models,
             c1 = 1., # 0.08 unnormed
             c2 = 0., # 0.005,
             beta1 = 0.9,
             beta2 = 0.99,
             neg_slope = 0.1,
             lr = 1.0,
+            device: torch.device = "cpu",
         ):
-        super(SwarmGradAccel, self).__init__(params, num_particles)
+        super(SwarmGradAccel, self).__init__(models, device)
 
         self.V = torch.zeros_like(self.X)
         self.A = torch.zeros_like(self.X)
@@ -307,14 +288,14 @@ class SwarmGradAccel(Swarm):
 class CBO(Swarm):
     def __init__(
             self,
-            params,
-            num_particles = 10,
+            models: Iterable[nn.Module],
             lambda_ = 1.5, # drift
             sigma = 0.8, # diff
             temp = 30.0,
-            noise_type = "component"
+            noise_type = "component",
+            device: torch.device = "cpu",
         ):
-        super(CBO, self).__init__(params, num_particles)
+        super(CBO, self).__init__(models, device)
 
         self.lambda_ = lambda_ # drift
         self.sigma = sigma # diff
@@ -360,8 +341,7 @@ class CBO(Swarm):
 class EGICBO(Swarm):
     def __init__(
             self,
-            params,
-            num_particles = 10,
+            models: Iterable[nn.Module],
             lambda_ = 0.9, # drift
             sigma = 0.5, # diff
             kappa = 100000.0,
@@ -369,9 +349,10 @@ class EGICBO(Swarm):
             tau = 0.2,
             temp = 30.0,
             extrapolate = False, # Use Hessian?
-            noise_type = "component"
+            noise_type = "component",
+            device: torch.device = "cpu",
         ):
-        super(EGICBO, self).__init__(params, num_particles)
+        super(EGICBO, self).__init__(models, device)
 
         self.lambda_ = lambda_ # drift
         self.sigma = sigma # diff
@@ -515,10 +496,10 @@ class PlanarSwarm(Swarm):
 
     def __init__(
             self,
-            params,
-            num_particles = 10,
+            models: Iterable[nn.Module],
+            device: torch.device = "cpu"
         ):
-        super(PlanarSwarm, self).__init__(params, num_particles)
+        super(PlanarSwarm, self).__init__(models, device)
 
 
     def update_swarm(self):

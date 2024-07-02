@@ -227,9 +227,9 @@ def main(args):
             )
             run["parameters/c1"] = args.c1
             run["parameters/c2"] = args.c2
-            run["parameters/inertia"] = args.inertia
             run["parameters/beta1"] = args.beta1
             run["parameters/beta2"] = args.beta2
+            run["parameters/lr"] = args.lr
 
         elif opt == "pla":
             optimizer = PlanarSwarm(
@@ -267,8 +267,8 @@ def main(args):
                         F.nll_loss,
                         model,
                         data,
-                        target
-                        # lambda: F.nll_loss(model(data), target)
+                        target,
+                        lambda: F.nll_loss(model(data), target)
                     )
 
                     if args.neptune:
