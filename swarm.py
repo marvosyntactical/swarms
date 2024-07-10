@@ -44,7 +44,7 @@ class Swarm(optim.Optimizer):
         return X
 
     def _get_pprops(self, models: Iterable[nn.Module]):
-        # adapted from https://github.com/PdIPS/CBXpy/blob/main/cbx/utils/torch_utils.py
+        # taken from https://github.com/PdIPS/CBXpy/blob/main/cbx/utils/torch_utils.py
         params, buffers = stack_module_state(models)
         pnames = [p[0] for p in models[0].named_parameters()]
         pprop = OrderedDict()
@@ -161,7 +161,7 @@ class SwarmGrad(Swarm):
             c1 = 80.0, # 0.08 unnormed
             c2 = 0.0,
             inertia = 0.1,
-            neg_slope = 0.1,
+            leak = 0.1,
             device: torch.device = "cpu",
         ):
         super(SwarmGrad, self).__init__(models, device)
@@ -172,7 +172,7 @@ class SwarmGrad(Swarm):
 
         self.c1 = c1
         self.c2 = c2
-        self.neg_slope = neg_slope
+        self.leak = leak
         self.inertia = inertia
 
 
@@ -188,7 +188,7 @@ class SwarmGrad(Swarm):
         # print(f"H%: {f(H)}")
 
         fdiff = self.current_losses - self.current_losses[self.perm]
-        fdiff = F.leaky_relu(fdiff, negative_slope=self.neg_slope) # TODO inplace
+        fdiff = F.leaky_relu(fdiff, negative_slope=self.leak) # TODO inplace
         fdiff = fdiff.unsqueeze(-1)
         # print(f"fd%: {f(fdiff)}")
 
@@ -217,8 +217,9 @@ class SwarmGradAccel(Swarm):
             c2 = 0., # 0.005,
             beta1 = 0.9,
             beta2 = 0.99,
-            neg_slope = 0.1,
+            leak = 0.1,
             lr = 1.0,
+            K = 1,
             device: torch.device = "cpu",
         ):
         super(SwarmGradAccel, self).__init__(models, device)
@@ -226,13 +227,14 @@ class SwarmGradAccel(Swarm):
         self.V = torch.zeros_like(self.X)
         self.A = torch.zeros_like(self.X)
 
-        self.perm = list(range(self.N))
+        self.perms = [list(range(self.N)) for _ in range(K)]
 
         self.c1 = c1
         self.c2 = c2
-        self.neg_slope = neg_slope
+        self.leak = leak
         self.beta1 = beta1
         self.beta2 = beta2
+        self.K = K
 
         self.lr = lr
 
@@ -242,20 +244,23 @@ class SwarmGradAccel(Swarm):
     def update_swarm(self):
         t = self.t
 
-        # assign reference particles:
-        random.shuffle(self.perm)
+        Vref = torch.zeros_like(self.X)
 
-        H = self.X[self.perm] - self.X
-        H /= torch.linalg.norm(H, dim=-1).unsqueeze(-1) + 1e-5
+        # assign K reference particles:
+        for k in range(self.K):
+            random.shuffle(self.perms[k])
 
-        fdiff = self.current_losses - self.current_losses[self.perm]
-        F.leaky_relu(fdiff, negative_slope=self.neg_slope, inplace=True)
-        fdiff.unsqueeze_(-1)
+            Hk = self.X[self.perms[k]] - self.X
+            Hk /= torch.linalg.norm(Hk, dim=-1).unsqueeze(-1) + 1e-5
 
-        r1 = torch.rand(*H.shape).to(self.X.device) # U[0,1]
-        r2 = torch.randn(*H.shape).to(self.X.device) # N(0,1)
+            fdiffk = self.current_losses - self.current_losses[self.perms[k]]
+            F.leaky_relu(fdiffk, negative_slope=self.leak, inplace=True)
+            fdiffk.unsqueeze_(-1)
+            Vref += fdiffk * Hk / self.K
 
-        Vref = fdiff * H
+        r1 = torch.rand(*self.X.shape).to(self.X.device) # U[0,1]
+        r2 = torch.randn(*self.X.shape).to(self.X.device) # N(0,1)
+
         Vrnd = r2 * self.c2
 
         # Adam like update
@@ -291,7 +296,8 @@ class CBO(Swarm):
             models: Iterable[nn.Module],
             lambda_ = 1.5, # drift
             sigma = 0.8, # diff
-            temp = 30.0,
+            temp = 50.0,
+            dt = 0.1,
             noise_type = "component",
             device: torch.device = "cpu",
         ):
@@ -300,6 +306,7 @@ class CBO(Swarm):
         self.lambda_ = lambda_ # drift
         self.sigma = sigma # diff
         self.temp = temp
+        self.dt = dt
 
         self.noise_type = noise_type
 
@@ -326,7 +333,8 @@ class CBO(Swarm):
             # proportional to norm
             diffusion = torch.linalg.norm(drift,dim=-1).unsqueeze(1) * B
 
-        V = self.lambda_ * drift + self.sigma * diffusion
+        V = self.lambda_ * self.dt * drift + self.sigma * (self.dt**.5) * diffusion
+        # V = self.lambda_ * drift + self.sigma * diffusion
 
         self.V = V
         self.X += V

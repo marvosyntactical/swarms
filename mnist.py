@@ -11,6 +11,32 @@ import argparse
 import neptune
 
 
+class Perceptron(nn.Module):
+    # taken from https://github.com/PdIPS/CBXpy/blob/main/docs/examples/nns/models.py
+    def __init__(self, mean = 0.0, std = 1.0,
+                 act_fun=nn.ReLU,
+                 sizes = None):
+        super(Perceptron, self).__init__()
+        #
+        self.mean = mean
+        self.std = std
+        self.act_fun = act_fun()
+        self.sizes = sizes if sizes else [784, 10]
+        self.linears = nn.ModuleList([nn.Linear(self.sizes[i], self.sizes[i+1]) for i in range(len(self.sizes)-1)])
+        self.bns = nn.ModuleList([nn.BatchNorm1d(self.sizes[i+1], track_running_stats=False) for i in range(len(self.sizes)-1)])
+
+    def __call__(self, x):
+        x = x.view([x.shape[0], -1])
+        x = (x - self.mean)/self.std
+
+        for linear, bn in zip(self.linears, self.bns):
+            x = linear(x)
+            x = self.act_fun(x)
+            x = bn(x)
+
+        x = F.log_softmax(x, dim=1)
+        return x
+
 class SmallLinear(nn.Module):
     def __init__(self):
         super(SmallLinear, self).__init__()
@@ -64,7 +90,7 @@ def preprocess():
     # Load and preprocess the MNIST dataset
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
+        # transforms.Normalize((0.1307,), (0.3081,))
     ])
 
     train_dataset = datasets.MNIST('data', train=True, download=True, transform=transform)
@@ -108,11 +134,13 @@ def parse_args():
     parser.add_argument("--beta1", type=float, default=0.9, help="Beta1 Hyperparam of SGA")
     parser.add_argument("--beta2", type=float, default=0.99, help="Beta2 Hyperparam of SGA")
     parser.add_argument("--lr", type=float, default=1.0, help="Optional learning rate of SGA")
+    parser.add_argument("--K", type=int, default=1, help="# Reference particles of SGA")
 
     # CBO
     parser.add_argument("--lamda", type=float, default=1.5, help="Lambda Hyperparam of CBO")
     parser.add_argument("--sigma", type=float, default=0.5, help="Sigma Hyperparam of CBO")
     parser.add_argument("--noise", type=str, default="component", help="Noise type of CBO")
+    parser.add_argument("--dt", type=float, default=0.1, help="dt Hyperparam of CBO")
 
     # EGI CBO
     parser.add_argument("--kappa", type=float, default=1e5, help="Kappa Hyperparam of EGICBO")
@@ -152,16 +180,19 @@ def main(args):
 
 
     # Initialize the model and optimizer
+    # model_class = Perceptron
+    model_class = SmallLinear
 
     if args.gradient:
-        model = SmallLinear()
+        model = model_class()
         optimizer = torch.optim.Adam(
             model.parameters(),
             lr=0.01,
         )
 
     else:
-        models = [SmallLinear() for _ in range(args.N)]
+        # models = [model_class(sizes=[28*28,100,10]) for _ in range(args.N)]
+        models = [model_class() for _ in range(args.N)]
         model = models[0]
 
         opt = args.optim
@@ -170,11 +201,13 @@ def main(args):
                 models,
                 lambda_=args.lamda,
                 sigma=args.sigma,
+                dt=args.dt,
                 noise_type=args.noise
             )
             run["parameters/lambda"] = args.lamda
             run["parameters/sigma"] = args.sigma
             run["parameters/noise"] = args.noise
+            run["parameters/dt"] = args.dt
 
         elif opt == "pso":
             optimizer = PSO(
@@ -224,12 +257,14 @@ def main(args):
                 beta1=args.beta1,
                 beta2=args.beta2,
                 lr=args.lr,
+                K=args.K
             )
             run["parameters/c1"] = args.c1
             run["parameters/c2"] = args.c2
             run["parameters/beta1"] = args.beta1
             run["parameters/beta2"] = args.beta2
             run["parameters/lr"] = args.lr
+            run["parameters/K"] = args.K
 
         elif opt == "pla":
             optimizer = PlanarSwarm(
