@@ -5,7 +5,8 @@ from torchvision import datasets, transforms
 import contextlib
 from pprint import pprint
 
-from swarm import Swarm, PSO, SwarmGrad, SwarmGradAccel, CBO, EGICBO, PlanarSwarm
+from swarm import Swarm, PSO, SwarmGradAccel, CBO, EGICBO, PlanarSwarm
+import resampling as rsmp
 
 import argparse
 import neptune
@@ -17,7 +18,7 @@ class Perceptron(nn.Module):
                  act_fun=nn.ReLU,
                  sizes = None):
         super(Perceptron, self).__init__()
-        #
+
         self.mean = mean
         self.std = std
         self.act_fun = act_fun()
@@ -90,7 +91,7 @@ def preprocess():
     # Load and preprocess the MNIST dataset
     transform = transforms.Compose([
         transforms.ToTensor(),
-        # transforms.Normalize((0.1307,), (0.3081,))
+        transforms.Normalize((0.1307,), (0.3081,))
     ])
 
     train_dataset = datasets.MNIST('data', train=True, download=True, transform=transform)
@@ -141,6 +142,8 @@ def parse_args():
     parser.add_argument("--sigma", type=float, default=0.5, help="Sigma Hyperparam of CBO")
     parser.add_argument("--noise", type=str, default="component", help="Noise type of CBO")
     parser.add_argument("--dt", type=float, default=0.1, help="dt Hyperparam of CBO")
+    parser.add_argument("--do-momentum", action="store_true", help="Whether to use momentum update")
+    parser.add_argument("--resample", action="store_true", help="Whether to resample")
 
     # EGI CBO
     parser.add_argument("--kappa", type=float, default=1e5, help="Kappa Hyperparam of EGICBO")
@@ -180,8 +183,8 @@ def main(args):
 
 
     # Initialize the model and optimizer
-    # model_class = Perceptron
-    model_class = SmallLinear
+    model_class = Perceptron
+    # model_class = SmallLinear
 
     if args.gradient:
         model = model_class()
@@ -191,23 +194,32 @@ def main(args):
         )
 
     else:
-        # models = [model_class(sizes=[28*28,100,10]) for _ in range(args.N)]
-        models = [model_class() for _ in range(args.N)]
+        models = [model_class(sizes=[28*28,100,10]) for _ in range(args.N)]
+        # models = [model_class() for _ in range(args.N)]
         model = models[0]
 
         opt = args.optim
         if opt == "cbo":
+            if args.resample:
+                rs = rsmp.resampling([rsmp.loss_update_resampling(M=1, wait_thresh=40)], 1)
+            else:
+                rs = lambda s: None
+
             optimizer = CBO(
                 models,
                 lambda_=args.lamda,
                 sigma=args.sigma,
                 dt=args.dt,
-                noise_type=args.noise
+                noise_type=args.noise,
+                post_process=lambda cbo: rs(cbo),
+                do_momentum=args.do_momentum,
             )
             run["parameters/lambda"] = args.lamda
             run["parameters/sigma"] = args.sigma
             run["parameters/noise"] = args.noise
             run["parameters/dt"] = args.dt
+            run["parameters/do_momentum"] = args.do_momentum
+            run["parameters/resample"] = args.resample
 
         elif opt == "pso":
             optimizer = PSO(
@@ -257,7 +269,8 @@ def main(args):
                 beta1=args.beta1,
                 beta2=args.beta2,
                 lr=args.lr,
-                K=args.K
+                K=args.K,
+                do_momentum=args.do_momentum
             )
             run["parameters/c1"] = args.c1
             run["parameters/c2"] = args.c2
@@ -265,6 +278,7 @@ def main(args):
             run["parameters/beta2"] = args.beta2
             run["parameters/lr"] = args.lr
             run["parameters/K"] = args.K
+            run["parameters/do_momentum"] = args.do_momentum
 
         elif opt == "pla":
             optimizer = PlanarSwarm(

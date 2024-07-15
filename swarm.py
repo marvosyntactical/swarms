@@ -21,6 +21,7 @@ class Swarm(optim.Optimizer):
             self,
             models: Iterable[nn.Module],
             device: torch.device = "cpu",
+            post_process: Callable = lambda s: None,
         ):
 
         num_particles = len(models)
@@ -31,6 +32,18 @@ class Swarm(optim.Optimizer):
 
         self.X = self._initialize_particles(models, device=device)
         self.pprop = self._get_pprops(models)
+        self.pp = post_process
+
+        self.pbests_x = self.X
+        self.pbests_y = torch.Tensor([float("inf") for _ in range(self.N)]).to(self.X.device)
+
+    def update_bests(self):
+        # NOTE: This could be done with torch.where
+        for i in range(self.N):
+            curr_loss = self.current_losses[i]
+            if curr_loss < self.pbests_y[i]:
+                self.pbests_y[i] = curr_loss
+                self.pbests_x[i] = self.X[i]
 
 
     def _initialize_particles(self, models: Iterable[nn.Module], device: torch.device="cpu"):
@@ -94,8 +107,10 @@ class Swarm(optim.Optimizer):
             get_losses = vmap(get_loss, (None, 0))
 
             self.current_losses = get_losses(x, self.X)
+            self.update_bests()
 
             self.update_swarm()
+            self.pp(self)
 
             # Update the model (models[0]) parameters with the best particle
             best_particle_idx = self.get_best()
@@ -118,25 +133,25 @@ class PSO(Swarm):
         ):
         super(PSO, self).__init__(models, device)
 
-        self.pbests_x = self.X
-        self.pbests_y = torch.Tensor([float("inf") for _ in range(self.N)]).to(self.X.device)
         self.V = torch.zeros_like(self.X)
+        self.A = torch.zeros_like(self.X)
 
         self.c1 = c1 # personal
         self.c2 = c2 # global
         self.inertia = inertia
 
+        # NOTE dummy, add as arguments
+        self.beta1 = 0.9
+        self.beta2 = 0.99
+        self.t = 1
+        self.lr = 1.0
+
+
     def get_best(self):
         return torch.argmin(self.pbests_y)
 
     def update_swarm(self):
-        # NOTE: This could be done with torch.where
-        for i in range(self.N):
-            curr_loss = self.current_losses[i]
-            if curr_loss < self.pbests_y[i]:
-                self.pbests_y[i] = curr_loss
-                self.pbests_x[i] = self.X[i]
-
+        t = self.t
         best_idx = self.get_best()
 
         Vpers = self.pbests_x - self.X
@@ -145,62 +160,27 @@ class PSO(Swarm):
         r1 = torch.rand(*Vpers.shape).to(self.X.device)
         r2 = torch.rand(*Vglob.shape).to(self.X.device)
 
-        self.V = r1 * self.c1 * Vpers + r2 * self.c2 * Vglob + self.inertia * self.V
-        self.X += self.V
+        Vcurr = r1 * self.c1 * Vpers + r2 * self.c2 * Vglob
 
-    def stats(self):
-        avgV = torch.mean(torch.linalg.norm(self.V, dim=-1)).item()
+        if self.do_momentum:
 
-        return {"avg_v_norm": avgV}
+            V = self.beta1 * self.V + (1-self.beta1) * Vcurr
+            A = self.beta2 * self.A + (1-self.beta2) * Vcurr**2
 
+            mthat = V/(1-self.beta1**t)
+            vthat = A/(1-self.beta2**t)
 
-class SwarmGrad(Swarm):
-    def __init__(
-            self,
-            models: Iterable[nn.Module],
-            c1 = 80.0, # 0.08 unnormed
-            c2 = 0.0,
-            inertia = 0.1,
-            leak = 0.1,
-            device: torch.device = "cpu",
-        ):
-        super(SwarmGrad, self).__init__(models, device)
+            update = self.lr * (mthat / (torch.sqrt(vthat) + 1e-6))
 
-        self.V = torch.zeros_like(self.X)
+            self.A = A
+            self.V = V
+            self.X += update
 
-        self.perm = list(range(self.N))
-
-        self.c1 = c1
-        self.c2 = c2
-        self.leak = leak
-        self.inertia = inertia
-
-
-    def update_swarm(self):
-
-
-        # assign reference particles:
-        random.shuffle(self.perm)
-
-        # Unnormalized works with larger c1 (problem dependent?)
-        H = self.X[self.perm] - self.X
-        H /= torch.linalg.norm(H, dim=-1).unsqueeze(-1) + 1e-5
-        # print(f"H%: {f(H)}")
-
-        fdiff = self.current_losses - self.current_losses[self.perm]
-        fdiff = F.leaky_relu(fdiff, negative_slope=self.leak) # TODO inplace
-        fdiff = fdiff.unsqueeze(-1)
-        # print(f"fd%: {f(fdiff)}")
-
-        r1 = torch.rand(*H.shape).to(self.X.device) # U[0,1]
-        r2 = torch.randn(*H.shape).to(self.X.device) # N(0,1)
-
-        Vref = r1 * self.c1 * fdiff * H
-        Vrnd = r2 * self.c2
-        Vinr = self.inertia * self.V
-
-        self.V = Vref + Vrnd + Vinr
-        self.X += self.V
+            self.t += 1
+        else:
+            V = Vcurr + self.inertia * self.V
+            self.V = V
+            self.X += self.V
 
 
     def stats(self):
@@ -221,6 +201,7 @@ class SwarmGradAccel(Swarm):
             lr = 1.0,
             K = 1,
             device: torch.device = "cpu",
+            do_momentum: bool = True,
         ):
         super(SwarmGradAccel, self).__init__(models, device)
 
@@ -239,6 +220,7 @@ class SwarmGradAccel(Swarm):
         self.lr = lr
 
         self.t = 1
+        self.do_momentum = do_momentum
 
 
     def update_swarm(self):
@@ -256,30 +238,35 @@ class SwarmGradAccel(Swarm):
             fdiffk = self.current_losses - self.current_losses[self.perms[k]]
             F.leaky_relu(fdiffk, negative_slope=self.leak, inplace=True)
             fdiffk.unsqueeze_(-1)
-            Vref += fdiffk * Hk / self.K
+            Vref += fdiffk * Hk
+
+        Vref /= self.K
 
         r1 = torch.rand(*self.X.shape).to(self.X.device) # U[0,1]
         r2 = torch.randn(*self.X.shape).to(self.X.device) # N(0,1)
 
         Vrnd = r2 * self.c2
 
-        # Adam like update
-        V = self.beta1 * self.V + (1-self.beta1) * Vref
-        A = self.beta2 * self.A + (1-self.beta2) * Vref**2
+        if self.do_momentum:
+            # Adam like update
 
-        mthat = V/(1-self.beta1**t)
-        vthat = A/(1-self.beta2**t)
+            V = self.beta1 * self.V + (1-self.beta1) * Vref
+            A = self.beta2 * self.A + (1-self.beta2) * Vref**2
 
-        update = self.lr * self.c1 * r1 * (mthat / (torch.sqrt(vthat) + 1e-6)) + Vrnd
+            mthat = V/(1-self.beta1**t)
+            vthat = A/(1-self.beta2**t)
 
-        self.A = A
-        self.V = V
-        self.X += update
+            update = self.lr * self.c1 * r1 * (mthat / (torch.sqrt(vthat) + 1e-6)) + Vrnd
 
-        self.t += 1
-        # if self.t % 100 == 0:
-        #     self.lr += .5
-        #     print(f"learning rate is now {self.lr}")
+            self.A = A
+            self.V = V
+            self.X += update
+
+            self.t += 1
+        else:
+            V = self.c1 * r1 * Vref + Vrnd
+            self.V = V
+            self.X += V
 
     def stats(self):
         avgV = torch.mean(torch.linalg.norm(self.V, dim=-1)).item()
@@ -300,15 +287,27 @@ class CBO(Swarm):
             dt = 0.1,
             noise_type = "component",
             device: torch.device = "cpu",
+            post_process: Callable = lambda s: None,
+            do_momentum: bool = False,
         ):
-        super(CBO, self).__init__(models, device)
+        super(CBO, self).__init__(models, device, post_process=post_process)
 
         self.lambda_ = lambda_ # drift
         self.sigma = sigma # diff
         self.temp = temp
         self.dt = dt
 
+        self.V = torch.zeros_like(self.X)
+        self.A = torch.zeros_like(self.X)
+
         self.noise_type = noise_type
+        self.do_momentum = do_momentum
+
+        # NOTE dummy, add as arguments
+        self.beta1 = 0.9
+        self.beta2 = 0.99
+        self.t = 1
+        self.lr = 1.0
 
     def get_softmax(self):
         weights = torch.Tensor([torch.exp(-self.temp * self.current_losses[i]) for i in range(self.N)]).to(self.X.device)
@@ -320,6 +319,7 @@ class CBO(Swarm):
         return num/(denominator + 1e-6)
 
     def update_swarm(self):
+        t = self.t
         softmax = self.get_softmax()
 
         drift = softmax.unsqueeze(0) - self.X
@@ -327,17 +327,35 @@ class CBO(Swarm):
         B = torch.randn(*drift.shape).to(self.X.device)
 
         if self.noise_type == "component":
-            # componentwise
+            # componentwise / anisotropic
             diffusion = drift * B
         else:
-            # proportional to norm
-            diffusion = torch.linalg.norm(drift,dim=-1).unsqueeze(1) * B
+            # proportional to norm / isotropic
+            diffusion = torch.linalg.norm(drift, dim=-1).unsqueeze(1) * B
 
-        V = self.lambda_ * self.dt * drift + self.sigma * (self.dt**.5) * diffusion
-        # V = self.lambda_ * drift + self.sigma * diffusion
+        Vdet = drift
+        Vrnd = self.sigma * (self.dt**.5) * diffusion
 
-        self.V = V
-        self.X += V
+        if self.do_momentum:
+
+            # Adam like update
+            V = self.beta1 * self.V + (1-self.beta1) * Vdet
+            A = self.beta2 * self.A + (1-self.beta2) * Vdet**2
+
+            mthat = V/(1-self.beta1**t)
+            vthat = A/(1-self.beta2**t)
+
+            update = self.lr * self.lambda_ * self.dt * (mthat / (torch.sqrt(vthat) + 1e-6)) + Vrnd
+
+            self.A = A
+            self.V = V
+            self.X += update
+            self.t += 1
+        else:
+            V = self.lambda_ * self.dt * Vdet + Vrnd
+            self.V = V
+            self.X += self.V
+
 
 
     def stats(self):
