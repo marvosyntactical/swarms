@@ -130,20 +130,21 @@ def parse_args():
     parser.add_argument("--c1", type=float, default=1.0, help="c1 Hyperparam of optimizer")
     parser.add_argument("--c2", type=float, default=1.0, help="c2 Hyperparam of optimizer")
     parser.add_argument("--inertia", type=float, default=0.1, help="Inertia Hyperparam")
+    parser.add_argument("--do-momentum", action="store_true", help="Whether to use momentum update")
 
     # SGA
     parser.add_argument("--beta1", type=float, default=0.9, help="Beta1 Hyperparam of SGA")
     parser.add_argument("--beta2", type=float, default=0.99, help="Beta2 Hyperparam of SGA")
     parser.add_argument("--lr", type=float, default=1.0, help="Optional learning rate of SGA")
     parser.add_argument("--K", type=int, default=1, help="# Reference particles of SGA")
+    parser.add_argument("--normalize", action="store_true", help="Whether to normalize drift")
 
     # CBO
     parser.add_argument("--lamda", type=float, default=1.5, help="Lambda Hyperparam of CBO")
     parser.add_argument("--sigma", type=float, default=0.5, help="Sigma Hyperparam of CBO")
     parser.add_argument("--noise", type=str, default="component", help="Noise type of CBO")
     parser.add_argument("--dt", type=float, default=0.1, help="dt Hyperparam of CBO")
-    parser.add_argument("--do-momentum", action="store_true", help="Whether to use momentum update")
-    parser.add_argument("--resample", action="store_true", help="Whether to resample")
+    parser.add_argument("--resample", type=int, default=40, help="Resample if swarm has not improved for this many updates")
 
     # EGI CBO
     parser.add_argument("--kappa", type=float, default=1e5, help="Kappa Hyperparam of EGICBO")
@@ -201,7 +202,7 @@ def main(args):
         opt = args.optim
         if opt == "cbo":
             if args.resample:
-                rs = rsmp.resampling([rsmp.loss_update_resampling(M=1, wait_thresh=40)], 1)
+                rs = rsmp.resampling([rsmp.loss_update_resampling(M=1, wait_thresh=args.resample)], 1)
             else:
                 rs = lambda s: None
 
@@ -270,7 +271,8 @@ def main(args):
                 beta2=args.beta2,
                 lr=args.lr,
                 K=args.K,
-                do_momentum=args.do_momentum
+                do_momentum=args.do_momentum,
+                normalize=args.normalize,
             )
             run["parameters/c1"] = args.c1
             run["parameters/c2"] = args.c2
@@ -279,6 +281,7 @@ def main(args):
             run["parameters/lr"] = args.lr
             run["parameters/K"] = args.K
             run["parameters/do_momentum"] = args.do_momentum
+            run["parameters/normalize"] = args.normalize
 
         elif opt == "pla":
             optimizer = PlanarSwarm(

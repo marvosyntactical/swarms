@@ -17,7 +17,7 @@ class resampling:
     ----------
     resamplings: list
         The list of resamplings to apply. Each entry should be a callable that accepts exactly one argument (the dynamic object) and returns a one-dimensional
-        numpy array of indices.
+        numpy array of indices. Makes multiple resampling criteria possible.
 
     apply: Callable
         - ``dyn``: The dynmaic which the resampling is applied to.
@@ -78,11 +78,12 @@ class loss_update_resampling:
         self.wait_thresh = wait_thresh
 
     def __call__(self, swarm):
+        # NOTE: M dimension ignored; only implemented for M=1 swarm
         self.wait += 1
-        u_idx = self.best_energy > swarm.get_best()
-        # print(self.wait.shape, u_idx.shape)
-        self.wait[u_idx] = 0
-        self.best_energy[u_idx] = swarm.get_best().unsqueeze(0).float()[u_idx]
-        idx = torch.where(self.wait >= self.wait_thresh)[0]
-        self.wait = self.wait % self.wait_thresh
+        u_idx = swarm.get_best() < self.best_energy # has the swarm improved?
+        self.wait[u_idx] = 0 # reset counter if swarm improved
+        idx = torch.where(self.wait >= self.wait_thresh)[0] # indexes only run if it hasnt improved in wait_thresh updates
+
+        self.wait = self.wait % self.wait_thresh # resets indexed run
+        self.best_energy[u_idx] = swarm.get_best().unsqueeze(0).float()[u_idx] # update best loss if improved
         return idx

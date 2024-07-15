@@ -202,6 +202,7 @@ class SwarmGradAccel(Swarm):
             K = 1,
             device: torch.device = "cpu",
             do_momentum: bool = True,
+            normalize: bool = True,
         ):
         super(SwarmGradAccel, self).__init__(models, device)
 
@@ -221,6 +222,7 @@ class SwarmGradAccel(Swarm):
 
         self.t = 1
         self.do_momentum = do_momentum
+        self.normalize = normalize
 
 
     def update_swarm(self):
@@ -228,16 +230,20 @@ class SwarmGradAccel(Swarm):
 
         Vref = torch.zeros_like(self.X)
 
-        # assign K reference particles:
         for k in range(self.K):
+            # assign kth new reference particle:
             random.shuffle(self.perms[k])
 
+            # normed vector pointing to reference particle
             Hk = self.X[self.perms[k]] - self.X
-            Hk /= torch.linalg.norm(Hk, dim=-1).unsqueeze(-1) + 1e-5
+            if self.normalize:
+                Hk /= torch.linalg.norm(Hk, dim=-1).unsqueeze(-1) + 1e-5
 
+            # difference in loss (leak decreases this if particle is already better than reference)
             fdiffk = self.current_losses - self.current_losses[self.perms[k]]
             F.leaky_relu(fdiffk, negative_slope=self.leak, inplace=True)
             fdiffk.unsqueeze_(-1)
+
             Vref += fdiffk * Hk
 
         Vref /= self.K
@@ -304,8 +310,8 @@ class CBO(Swarm):
         self.do_momentum = do_momentum
 
         # NOTE dummy, add as arguments
-        self.beta1 = 0.9
-        self.beta2 = 0.99
+        self.beta1 = 0.7
+        self.beta2 = 0.9
         self.t = 1
         self.lr = 1.0
 
@@ -337,8 +343,8 @@ class CBO(Swarm):
         Vrnd = self.sigma * (self.dt**.5) * diffusion
 
         if self.do_momentum:
+            # CBO w/ momentum: https://arxiv.org/abs/2012.04827
 
-            # Adam like update
             V = self.beta1 * self.V + (1-self.beta1) * Vdet
             A = self.beta2 * self.A + (1-self.beta2) * Vdet**2
 
