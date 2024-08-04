@@ -26,7 +26,7 @@ class resampling:
         The function that should be performed on a given dynamic for selected indices. This function has to have the signature apply(dyn,idx).
 
     """
-    def __init__(self, resamplings: List[Callable], M: int, apply:Callable = None):
+    def __init__(self, resamplings: List[Callable], M: int, apply: Callable = None):
         self.resamplings = resamplings
         self.M = M
         self.num_resampling = torch.zeros(M)

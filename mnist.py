@@ -145,6 +145,7 @@ def parse_args():
     parser.add_argument("--noise", type=str, default="component", help="Noise type of CBO")
     parser.add_argument("--dt", type=float, default=0.1, help="dt Hyperparam of CBO")
     parser.add_argument("--resample", type=int, default=40, help="Resample if swarm has not improved for this many updates")
+    parser.add_argument("--temp", type=float, default=50.0, help="Softmax Temperature")
 
     # EGI CBO
     parser.add_argument("--kappa", type=float, default=1e5, help="Kappa Hyperparam of EGICBO")
@@ -214,6 +215,7 @@ def main(args):
                 noise_type=args.noise,
                 post_process=lambda cbo: rs(cbo),
                 do_momentum=args.do_momentum,
+                temp=args.temp
             )
             run["parameters/lambda"] = args.lamda
             run["parameters/sigma"] = args.sigma
@@ -221,6 +223,7 @@ def main(args):
             run["parameters/dt"] = args.dt
             run["parameters/do_momentum"] = args.do_momentum
             run["parameters/resample"] = args.resample
+            run["parameters/temp"] = args.temp
 
         elif opt == "pso":
             optimizer = PSO(
@@ -250,6 +253,7 @@ def main(args):
             run["parameters/tau"] = args.tau
             run["parameters/slack"] = args.slack
             run["parameters/hess"] = args.hess
+            run["parameters/noise"] = args.noise
 
         elif opt == "sg":
             optimizer = SwarmGrad(

@@ -130,6 +130,7 @@ class PSO(Swarm):
             c2 = 0.5, # global
             inertia = 0.1,
             device: torch.device = "cpu",
+            do_momentum: bool = False,
         ):
         super(PSO, self).__init__(models, device)
 
@@ -145,6 +146,8 @@ class PSO(Swarm):
         self.beta2 = 0.99
         self.t = 1
         self.lr = 1.0
+
+        self.do_momentum = do_momentum
 
 
     def get_best(self):
@@ -316,30 +319,26 @@ class CBO(Swarm):
         self.lr = 1.0
 
     def get_softmax(self):
-        weights = torch.Tensor([torch.exp(-self.temp * self.current_losses[i]) for i in range(self.N)]).to(self.X.device)
-        denominator = torch.sum(weights)
-        num = torch.zeros_like(self.X[0])
-        for i in range(self.N):
-            addition = self.X[i] * weights[i]
-            num += addition
-        return num/(denominator + 1e-6)
+        # logsumexp trick from https://github.com/PdIPS/CBXpy/blob/main/cbx/utils/torch_utils.py
+        weights = - (self.temp * self.current_losses).to(self.X.device)
+        coeffs = torch.exp(weights - torch.logsumexp(weights, dim=-1, keepdims=True))
+        return (self.X * coeffs.unsqueeze(1)).sum(axis=0)
 
     def update_swarm(self):
         t = self.t
         softmax = self.get_softmax()
 
-        drift = softmax.unsqueeze(0) - self.X
+        Vdet = softmax.unsqueeze(0) - self.X
 
-        B = torch.randn(*drift.shape).to(self.X.device)
+        B = torch.randn(*Vdet.shape).to(self.X.device)
 
         if self.noise_type == "component":
             # componentwise / anisotropic
-            diffusion = drift * B
+            diffusion = Vdet * B
         else:
             # proportional to norm / isotropic
-            diffusion = torch.linalg.norm(drift, dim=-1).unsqueeze(1) * B
+            diffusion = torch.linalg.norm(Vdet, dim=-1).unsqueeze(1) * B
 
-        Vdet = drift
         Vrnd = self.sigma * (self.dt**.5) * diffusion
 
         if self.do_momentum:
@@ -361,8 +360,6 @@ class CBO(Swarm):
             V = self.lambda_ * self.dt * Vdet + Vrnd
             self.V = V
             self.X += self.V
-
-
 
     def stats(self):
         avgV = torch.mean(torch.linalg.norm(self.V, dim=-1)).item()
