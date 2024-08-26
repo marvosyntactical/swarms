@@ -16,6 +16,7 @@ from torch.func import vmap, functional_call, stack_module_state
 # For Debugging
 f = lambda t: (t.isnan().sum()/t.nelement()).item()
 
+
 class Swarm(optim.Optimizer):
     def __init__(
             self,
@@ -105,10 +106,9 @@ class Swarm(optim.Optimizer):
                 return loss
 
             get_losses = vmap(get_loss, (None, 0))
-
             self.current_losses = get_losses(x, self.X)
-            self.update_bests()
 
+            self.update_bests()
             self.update_swarm()
             self.pp(self)
 
@@ -205,9 +205,10 @@ class SwarmGradAccel(Swarm):
             K = 1,
             device: torch.device = "cpu",
             do_momentum: bool = True,
+            post_process: Callable = lambda s: None,
             normalize: bool = True,
         ):
-        super(SwarmGradAccel, self).__init__(models, device)
+        super(SwarmGradAccel, self).__init__(models, device, post_process=post_process)
 
         self.V = torch.zeros_like(self.X)
         self.A = torch.zeros_like(self.X)
@@ -227,6 +228,10 @@ class SwarmGradAccel(Swarm):
         self.do_momentum = do_momentum
         self.normalize = normalize
 
+        # NOTE FIXME: hardcoded for access by resampling
+        self.sigma = 0.1
+        self.dt = 0.1
+
 
     def update_swarm(self):
         t = self.t
@@ -237,13 +242,14 @@ class SwarmGradAccel(Swarm):
             # assign kth new reference particle:
             random.shuffle(self.perms[k])
 
-            # normed vector pointing to reference particle
+            # vector pointing to reference particle
             Hk = self.X[self.perms[k]] - self.X
             if self.normalize:
                 Hk /= torch.linalg.norm(Hk, dim=-1).unsqueeze(-1) + 1e-5
 
-            # difference in loss (leak decreases this if particle is already better than reference)
+            # difference in loss 
             fdiffk = self.current_losses - self.current_losses[self.perms[k]]
+            # leaky relu decreases difference if particle is already better than reference
             F.leaky_relu(fdiffk, negative_slope=self.leak, inplace=True)
             fdiffk.unsqueeze_(-1)
 
@@ -251,7 +257,9 @@ class SwarmGradAccel(Swarm):
 
         Vref /= self.K
 
-        r1 = torch.rand(*self.X.shape).to(self.X.device) # U[0,1]
+        # r1 = torch.rand(*self.X.shape).to(self.X.device) # U[0,1]
+        r1 = 1.0 # NOTE TODO TEST REMOVE
+        # r1 = torch.rand(*self.X.shape).to(self.X.device) # NOTE TODO TEST REMOVE
         r2 = torch.randn(*self.X.shape).to(self.X.device) # N(0,1)
 
         Vrnd = r2 * self.c2
@@ -375,20 +383,22 @@ class EGICBO(Swarm):
             sigma = 0.5, # diff
             kappa = 100000.0,
             slack = 10,
-            tau = 0.2,
+            dt = 0.1,
             temp = 30.0,
             extrapolate = False, # Use Hessian?
             noise_type = "component",
+            post_process: Callable = lambda s: None,
             device: torch.device = "cpu",
+            do_momentum: bool = False,
         ):
-        super(EGICBO, self).__init__(models, device)
+        super(EGICBO, self).__init__(models, device, post_process=post_process)
 
         self.lambda_ = lambda_ # drift
         self.sigma = sigma # diff
         self.temp = temp
         self.kappa = kappa
         self.slack = slack
-        self.tau = tau
+        self.dt = dt
 
         self.extrapolate = extrapolate
 
@@ -397,14 +407,28 @@ class EGICBO(Swarm):
         # first particle serves as mean
         self.X[0] = torch.mean(self.X[1:], dim=0)
 
+        # NOTE dummy, add as arguments
+        self.beta1 = 0.7
+        self.beta2 = 0.9
+        self.t = 1
+        self.do_momentum = do_momentum
+
+
+    # def get_softmax(self):
+    #     # NAIVE
+    #     weights = torch.Tensor([torch.exp(-self.temp * self.current_losses[i]) for i in range(self.N)]).to(self.X.device)
+    #     denominator = torch.sum(weights)
+    #     num = torch.zeros_like(self.X[0])
+    #     for i in range(self.N):
+    #         addition = self.X[i] * weights[i]
+    #         num += addition
+    #     return num/(denominator + 1e-6)
+
     def get_softmax(self):
-        weights = torch.Tensor([torch.exp(-self.temp * self.current_losses[i]) for i in range(self.N)]).to(self.X.device)
-        denominator = torch.sum(weights)
-        num = torch.zeros_like(self.X[0])
-        for i in range(self.N):
-            addition = self.X[i] * weights[i]
-            num += addition
-        return num/(denominator + 1e-6)
+        # logsumexp trick from https://github.com/PdIPS/CBXpy/blob/main/cbx/utils/torch_utils.py
+        weights = - (self.temp * self.current_losses).to(self.X.device)
+        coeffs = torch.exp(weights - torch.logsumexp(weights, dim=-1, keepdims=True))
+        return (self.X * coeffs.unsqueeze(1)).sum(axis=0)
 
     def grad_and_hessian(self, idx=0):
         """
@@ -498,9 +522,31 @@ class EGICBO(Swarm):
             # proportional to norm
             diffusion = torch.linalg.norm(drift,dim=-1).unsqueeze(1) * B
 
-        V = self.tau * self.lambda_ * drift \
-            - self.tau * self.kappa * g \
-            + self.tau**.5 * self.sigma * diffusion
+
+        # NOTE figure out if applying lambda here is problematic
+        # if lambda != 1.0
+        Vdet = self.lambda_ * drift - self.kappa * g
+
+        Vrnd = (self.dt**.5) * self.sigma * diffusion
+
+        if self.do_momentum:
+            # CBO w/ momentum: https://arxiv.org/abs/2012.04827
+            V = self.beta1 * self.V + (1-self.beta1) * Vdet
+            A = self.beta2 * self.A + (1-self.beta2) * Vdet**2
+
+            mthat = V/(1-self.beta1**t)
+            vthat = A/(1-self.beta2**t)
+
+            update = self.dt * (mthat / (torch.sqrt(vthat) + 1e-6)) + Vrnd
+
+            self.A = A
+            self.V = V
+            self.X += update
+            self.t += 1
+        else:
+            V = self.dt * Vdet + Vrnd
+            self.V = V
+            self.X += self.V
 
         self.X += V
 
