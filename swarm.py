@@ -86,23 +86,22 @@ class Swarm(optim.Optimizer):
 
 
     def step(self,
-            loss_func: Optional[Callable] = None,
             model: Optional[nn.Module] = None,
             x: Optional[torch.Tensor] = None,
-            y: Optional[torch.Tensor] = None,
-            closure: Optional[Callable] = None
+            loss_fn_fn: Optional[Callable] = None, # must have signature model_output -> loss
         ):
 
         with torch.no_grad():
 
-            required = loss_func, model, x, y
+            required = loss_fn_fn, model, x
             assert None not in required, required
 
             def get_loss(inp, X):
                 pprop = self.pprop
                 params = {p: X[pprop[p][-2]:pprop[p][-1]].view(pprop[p][0]) for p in pprop}
                 pred = functional_call(model, (params, {}), inp)
-                loss = loss_func(pred, y)
+                # loss = loss_func(pred, y)
+                loss = loss_fn_fn(pred)
                 return loss
 
             get_losses = vmap(get_loss, (None, 0))
@@ -207,13 +206,22 @@ class SwarmGradAccel(Swarm):
             do_momentum: bool = True,
             post_process: Callable = lambda s: None,
             normalize: bool = True,
+            sub_swarms: int = 1,
         ):
         super(SwarmGradAccel, self).__init__(models, device, post_process=post_process)
 
         self.V = torch.zeros_like(self.X)
         self.A = torch.zeros_like(self.X)
 
+        # single swarm case:
         self.perms = [list(range(self.N)) for _ in range(K)]
+
+        # sub swarms case:
+        assert self.N % sub_swarms == 0, (self.N, sub_swarms)
+        self.ss_size = ss_size = int(self.N/sub_swarms)
+        self.sub_perms = [[list(range(ss*ss_size, (ss+1)*ss_size)) for ss in range(sub_swarms)] for _ in range(K)]
+        self.sub_swarms = sub_swarms
+        self.merged = False
 
         self.c1 = c1
         self.c2 = c2
@@ -232,23 +240,41 @@ class SwarmGradAccel(Swarm):
         self.sigma = 0.1
         self.dt = 0.1
 
+    def assign_ref(self, k: int):
+
+        if self.sub_swarms == 1 or self.merged:
+            random.shuffle(self.perms[k])
+            ref = self.perms[k]
+        else:
+            ref = []
+            for sub in range(self.sub_swarms):
+                random.shuffle(self.sub_perms[k][sub])
+                ref += self.sub_perms[k][sub]
+
+        return ref
+
+
 
     def update_swarm(self):
         t = self.t
+        if t == 1000:
+            # print("="*30)
+            # print("SUB SWARMS MERGED")
+            self.merged = True
 
         Vref = torch.zeros_like(self.X)
 
         for k in range(self.K):
             # assign kth new reference particle:
-            random.shuffle(self.perms[k])
+            ref_k = self.assign_ref(k)
 
             # vector pointing to reference particle
-            Hk = self.X[self.perms[k]] - self.X
+            Hk = self.X[ref_k] - self.X
             if self.normalize:
                 Hk /= torch.linalg.norm(Hk, dim=-1).unsqueeze(-1) + 1e-5
 
             # difference in loss 
-            fdiffk = self.current_losses - self.current_losses[self.perms[k]]
+            fdiffk = self.current_losses - self.current_losses[ref_k]
             # leaky relu decreases difference if particle is already better than reference
             F.leaky_relu(fdiffk, negative_slope=self.leak, inplace=True)
             fdiffk.unsqueeze_(-1)
@@ -279,11 +305,12 @@ class SwarmGradAccel(Swarm):
             self.V = V
             self.X += update
 
-            self.t += 1
         else:
             V = self.c1 * r1 * Vref + Vrnd
             self.V = V
             self.X += V
+
+        self.t += 1
 
     def stats(self):
         avgV = torch.mean(torch.linalg.norm(self.V, dim=-1)).item()

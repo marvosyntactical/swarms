@@ -11,100 +11,193 @@ import resampling as rsmp
 import argparse
 import neptune
 
+import gym
+import numpy as np
+from torch.distributions import Categorical
 
-class Perceptron(nn.Module):
-    # taken from https://github.com/PdIPS/CBXpy/blob/main/docs/examples/nns/models.py
-    def __init__(self, mean = 0.0, std = 1.0,
-                 act_fun=nn.ReLU,
-                 sizes = None):
-        super(Perceptron, self).__init__()
+# RL by Claude Opus
 
-        self.mean = mean
-        self.std = std
-        self.act_fun = act_fun()
-        self.sizes = sizes if sizes else [784, 10]
-        self.linears = nn.ModuleList([nn.Linear(self.sizes[i], self.sizes[i+1]) for i in range(len(self.sizes)-1)])
-        self.bns = nn.ModuleList([nn.BatchNorm1d(self.sizes[i+1], track_running_stats=False) for i in range(len(self.sizes)-1)])
 
-    def __call__(self, x):
-        x = x.view([x.shape[0], -1])
-        x = (x - self.mean)/self.std
-
-        for linear, bn in zip(self.linears, self.bns):
-            x = linear(x)
-            x = self.act_fun(x)
-            x = bn(x)
-
-        x = F.log_softmax(x, dim=1)
-        return x
-
-class SmallLinear(nn.Module):
+class PPOMemory:
     def __init__(self):
-        super(SmallLinear, self).__init__()
-        self.flatten = nn.Flatten()
-        self.fc1 = nn.Linear(28 * 28, 100)
-        self.sigmoid = nn.Sigmoid()
-        self.fc2 = nn.Linear(100, 10)
+        self.states = []
+        self.actions = []
+        self.rewards = []
+        self.values = []
+        self.log_probs = []
+        self.dones = []
 
-    def forward(self, x):
-        x = self.flatten(x)
-        x = self.sigmoid(self.fc1(x))
-        x = self.fc2(x)
-        x = F.log_softmax(x, dim=1)
-        return x
+    def clear(self):
+        self.states.clear()
+        self.actions.clear()
+        self.rewards.clear()
+        self.values.clear()
+        self.log_probs.clear()
+        self.dones.clear()
 
-class ConvNet(nn.Module):
-    def __init__(self):
-        super(ConvNet, self).__init__()
-        self.conv1 = nn.Conv2d(1, 32, 3, 1)
-        self.conv2 = nn.Conv2d(32, 64, 3, 1)
-        self.dropout1 = nn.Dropout2d(0.25)
-        self.dropout2 = nn.Dropout2d(0.5)
-        self.fc1 = nn.Linear(9216, 128)
-        self.fc2 = nn.Linear(128, 10)
+    def add(self, state, action, reward, value, log_prob, done):
+        self.states.append(state)
+        self.actions.append(action)
+        self.rewards.append(reward)
+        self.values.append(value)
+        self.log_probs.append(log_prob)
+        self.dones.append(done)
 
-    def forward(self, x):
-        x = self.conv1(x)
-        x = F.relu(x)
-        x = self.conv2(x)
-        x = F.relu(x)
-        x = F.max_pool2d(x, 2)
-        x = self.dropout1(x)
-        x = torch.flatten(x, 1)
-        x = self.fc1(x)
-        x = F.relu(x)
-        x = self.dropout2(x)
-        x = self.fc2(x)
-        output = F.log_softmax(x, dim=1)
-        return output
+class ActorCritic(nn.Module):
+    def __init__(self, input_dim, n_actions):
+        super(ActorCritic, self).__init__()
+        self.actor = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, n_actions),
+            nn.Softmax(dim=-1)
+        )
+        self.critic = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
 
-def freqs(t):
-    fs = {}
-    n = t.nelement()
-    for i in range(10):
-        fs[i] = f"{100*(t == i).sum().item()/n}%"
-    return fs
+    def forward(self, state):
+        action_probs = self.actor(state)
+        value = self.critic(state)
+        return action_probs, value
 
 
-def preprocess():
+def ppo_update(model, optimizer, memory, epochs, epsilon, gamma, device, args, episode, step, run):
 
-    # Load and preprocess the MNIST dataset
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
-    ])
+    states = torch.FloatTensor(np.array(memory.states)).to(device)
+    actions = torch.LongTensor(memory.actions).to(device)
+    rewards = torch.FloatTensor(memory.rewards).to(device)
+    values = torch.FloatTensor(memory.values).to(device)
+    log_probs = torch.FloatTensor(memory.log_probs).to(device)
+    dones = torch.FloatTensor(memory.dones).to(device)
 
-    train_dataset = datasets.MNIST('data', train=True, download=True, transform=transform)
-    test_dataset = datasets.MNIST('data', train=False, transform=transform)
+    returns = []
+    R = 0
+    for reward, done in zip(reversed(rewards), reversed(dones)):
+        R = reward + gamma * R * (1 - done) # reward decay
+        returns.insert(0, R)
+    returns = torch.tensor(returns).to(device)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1000, shuffle=False)
+    advantages = returns - values
 
-    return transform, train_dataset, test_dataset, train_loader, test_loader
+    def loss_fn(model_out):
+        action_probs, state_values = model_out
+
+        # dist = Categorical(action_probs)
+        # new_log_probs = dist.log_prob(actions)
+
+        def custom_categorical_log_prob(probs, actions):
+            # Ensure numerical stability by clipping probabilities
+            probs = torch.clamp(probs, min=1e-8, max=1-1e-8)
+
+            # Select the probabilities of the taken actions
+            action_probs = probs.gather(1, actions.unsqueeze(-1)).squeeze(-1)
+
+            # Compute log probabilities
+            log_probs = torch.log(action_probs)
+
+            return log_probs
+
+        new_log_probs = custom_categorical_log_prob(action_probs, actions)
+
+        ratio = (new_log_probs - log_probs).exp()
+        surr1 = ratio * advantages
+        surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * advantages
+
+        actor_loss = - torch.min(surr1, surr2).mean()
+        critic_loss = F.mse_loss(state_values.squeeze(), returns)
+
+        loss = actor_loss + 0.5 * critic_loss
+
+        return loss
+
+    for e in range(epochs):
+        model.train()
+
+        if args.gradient:
+            loss = loss_fn(model(states))
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        else:
+            loss = optimizer.step(
+                model,
+                states,
+                loss_fn,
+            )
+
+            if args.neptune:
+                for stat, val in optimizer.stats().items():
+                    run[f"train/{stat}"].append(val)
+
+        # print(f"Train Episode | Step | Epoch | Loss : {episode}\t{step}\t{e}\t{loss:.6f}")
+
+        if args.neptune:
+            run["train/loss"].append(loss.item())
+
+
+
+def train_ppo(env, model, optimizer, num_episodes, update_interval, epochs, epsilon, gamma, device, args, run):
+
+    memory = PPOMemory()
+
+    for episode in range(num_episodes):
+        state, info = env.reset()
+        done = False
+        total_reward = 0
+
+        step = 0
+        while not done:
+            state = torch.FloatTensor(state).unsqueeze(0).to(device)
+            action_probs, value = model(state)
+            dist = Categorical(action_probs)
+            action = dist.sample()
+            log_prob = dist.log_prob(action)
+
+            next_state, reward, done, _, _ = env.step(action.item())
+            total_reward += reward
+
+            memory.add(
+                state.cpu().numpy().flatten(),
+                action.item(),
+                reward,
+                value.item(),
+                log_prob.item(),
+                done,
+            )
+
+            if len(memory.states) >= update_interval or done:
+                ppo_update(
+                    model,
+                    optimizer,
+                    memory,
+                    epochs,
+                    epsilon,
+                    gamma,
+                    device,
+                    args,
+                    episode,
+                    step,
+                    run
+                )
+                memory.clear()
+
+            state = next_state
+            step += 1
+
+        # if episode % 10 == 0:
+        print(f"Episode {episode}, Total Reward: {total_reward}")
+
+        if args.neptune:
+            run["train/total_reward"].append(total_reward)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Swarm Experiments on MNIST")
+    parser.add_argument("--env", type=str, default='CartPole-v1', help="OpenAI Gym Environment Name")
 
     parser.add_argument("--gradient", action="store_true", help="Use Adam Baseline")
     parser.add_argument("--optim", type=str, default="sga",
@@ -120,8 +213,8 @@ def parse_args():
     )
     parser.add_argument("--N", type=int, default=10, help="Number of Particles")
 
-    parser.add_argument("--epo", type=int, default=1, help="Number of Epochs")
-    parser.add_argument("--stop", type=int, default=1e15, help="Alternatively, stop after this number of batches")
+    parser.add_argument("--episodes", type=int, default=1000, help="Number of Episodes")
+    parser.add_argument("--epochs", type=int, default=4, help="Number of Epochs")
 
     parser.add_argument("--neptune", action="store_true", help="Log to Neptune?")
 
@@ -164,15 +257,14 @@ def init_neptune(args):
         tok = f.read()
 
     run = neptune.init_run(
-        project="halcyon/swarm",
+        project="halcyon/rlswarm",
         api_token=tok,
     )
 
     run["parameters/gradient"] = args.gradient
     run["parameters/optim"] = args.optim
     run["parameters/N"] = args.N
-    run["parameters/epochs"] = args.epo
-    run["parameters/stop"] = args.stop
+    run["parameters/epochs"] = args.epochs
 
     return run
 
@@ -185,21 +277,25 @@ def main(args):
     else:
         run = {}
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Initialize the model and optimizer
-    model_class = Perceptron
-    # model_class = SmallLinear
+    # Set up the environment and model
+    env = gym.make(args.env)
+
+    input_dim = env.observation_space.shape[0]
+    n_actions = env.action_space.n
+
+
 
     if args.gradient:
-        model = model_class()
+        model = ActorCritic(input_dim, n_actions).to(device)
         optimizer = torch.optim.Adam(
             model.parameters(),
             lr=0.01,
         )
 
     else:
-        models = [model_class(sizes=[28*28,100,10]) for _ in range(args.N)]
-        # models = [model_class() for _ in range(args.N)]
+        models = [ActorCritic(input_dim, n_actions).to(device) for _ in range(args.N)]
         model = models[0]
 
         if args.resample >= 0:
@@ -293,73 +389,24 @@ def main(args):
         else:
             raise NotImplementedError(f"Optim={opt}")
 
-    # Prep Data
-    transform, train_dataset, test_dataset, train_loader, test_loader = preprocess()
+    # Hyperparameters TODO make argparse args
+    num_episodes = args.episodes
+    epochs = args.epochs
+    # NOTE: try not to fiddle with hyperparams that are relatively
+    # orthogonal to the kind of optimizer used
+    update_interval = 128
+    epsilon = 0.2
+    gamma = 0.99
 
-    # Train the model
+    #  ----- Train the model -----
 
     # Dont compute gradients in case of Swarm optimizer
     train_context = torch.no_grad if not args.gradient else contextlib.nullcontext
 
     with train_context():
-        for epoch in range(args.epo):
-            model.train()
-            for batch_idx, (data, target) in enumerate(train_loader):
+        # Run the training
+        train_ppo(env, model, optimizer, num_episodes, update_interval, epochs, epsilon, gamma, device, args, run)
 
-                if batch_idx+len(train_loader)*epoch > args.stop:
-                    break
-
-                if args.gradient:
-                    optimizer.zero_grad()
-
-                    output = model(data)
-                    loss = F.nll_loss(output, target)
-                    loss.backward()
-
-                    optimizer.step()
-                else:
-                    loss = optimizer.step(
-                        model,
-                        data,
-                        lambda out: F.nll_loss(out, target)
-                    )
-
-                    if args.neptune:
-                        for stat, val in optimizer.stats().items():
-                            run[f"train/{stat}"].append(val)
-
-                if args.neptune:
-                    run["train/loss"].append(loss.item())
-
-
-                # if batch_idx % 20 == 0:
-                print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                    epoch, batch_idx * len(data), len(train_loader.dataset),
-                    100. * batch_idx / len(train_loader), loss.item()))
-
-            # Evaluate the model after each epoch
-            model.eval()
-            test_loss = 0
-            correct = 0
-
-            for data, target in test_loader:
-                output = model(data)
-                test_loss += F.nll_loss(output, target, reduction='sum').item()
-                pred = output.argmax(dim=1, keepdim=True)
-                correct += pred.eq(target.view_as(pred)).sum().item()
-
-            # Sanity Check: To see if net just learned to output one digit always
-            pprint(freqs(pred))
-
-            test_loss /= len(test_loader.dataset)
-            accuracy = 100. * correct / len(test_loader.dataset)
-
-            print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-                test_loss, correct, len(test_loader.dataset), accuracy))
-
-            if args.neptune:
-                run["test/loss"].append(test_loss)
-                run["test/acc"].append(accuracy)
 
     if args.neptune:
         run.stop()
