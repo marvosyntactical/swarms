@@ -15,6 +15,8 @@ import gym
 import numpy as np
 from torch.distributions import Categorical
 
+import matplotlib.pyplot as plt
+
 # RL by Claude Opus
 
 
@@ -85,6 +87,10 @@ def ppo_update(model, optimizer, memory, epochs, epsilon, gamma, device, args, e
     def loss_fn(model_out):
         action_probs, state_values = model_out
 
+        # NOTE: Cannot init torch.distribution object because this contains if/else control flow
+        # and Swarm.step uses pytorch's vmap for parallelization between models, which does not
+        # allow for control flow
+
         # dist = Categorical(action_probs)
         # new_log_probs = dist.log_prob(actions)
 
@@ -126,7 +132,7 @@ def ppo_update(model, optimizer, memory, epochs, epsilon, gamma, device, args, e
             loss = optimizer.step(
                 model,
                 states,
-                loss_fn,
+                loss_fn
             )
 
             if args.neptune:
@@ -188,12 +194,47 @@ def train_ppo(env, model, optimizer, num_episodes, update_interval, epochs, epsi
             state = next_state
             step += 1
 
-        # if episode % 10 == 0:
-        print(f"Episode {episode}, Total Reward: {total_reward}")
+        print(f"Episode {episode}, Total Reward: {total_reward}, Steps: {step}")
+
+        if episode and episode % 50 == 0:
+            for testrun in range(1):
+                reward = visualize_episode(env, model, device)
+                print(f"Visualized Test Run {testrun}, Total Reward {reward}")
 
         if args.neptune:
             run["train/total_reward"].append(total_reward)
 
+def visualize_episode(env, model, device):
+    state, _ = env.reset()
+    done = False
+    total_reward = 0
+
+    plt.figure(figsize=(8, 6))
+    img_plot = plt.imshow(env.render())
+    plt.axis('off')
+
+    while not done:
+        plt.pause(0.01)
+        # print("Renderin'")
+        # arr = env.render() # This line renders the environment
+        # print(arr.shape)
+
+        state = torch.FloatTensor(state).unsqueeze(0).to(device)
+        with torch.no_grad():
+            action_probs, _ = model(state)
+
+        action = torch.argmax(action_probs).item()
+
+        state, reward, done, _, _ = env.step(action)
+        total_reward += reward
+
+        # Update the image
+        img_plot.set_data(env.render())
+        plt.draw()
+
+    plt.close()
+    env.close()
+    return total_reward
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Swarm Experiments on MNIST")
@@ -223,12 +264,14 @@ def parse_args():
     parser.add_argument("--c1", type=float, default=1.0, help="c1 Hyperparameter of optimizer")
     parser.add_argument("--c2", type=float, default=1.0, help="c2 Hyperparameter of optimizer")
     parser.add_argument("--inertia", type=float, default=0.1, help="Inertia Hyperparam")
-    parser.add_argument("--do-momentum", action="store_true", help="Whether to use momentum update")
     parser.add_argument("--resample", type=int, default=40, help="Resample if swarm has not improved for this many updates. Negative for no resampling.")
 
+    # Momentum related Hyperparameters
+    parser.add_argument("--do-momentum", action="store_true", help="Whether to use momentum update")
+    parser.add_argument("--beta1", type=float, default=0.9, help="Beta1 Hyperparameter of Momentum")
+    parser.add_argument("--beta2", type=float, default=0.99, help="Beta2 Hyperparameter of Momentum")
+
     # SGA
-    parser.add_argument("--beta1", type=float, default=0.9, help="Beta1 Hyperparameter of SGA")
-    parser.add_argument("--beta2", type=float, default=0.99, help="Beta2 Hyperparameter of SGA")
     parser.add_argument("--lr", type=float, default=1.0, help="Optional learning rate of SGA")
     parser.add_argument("--K", type=int, default=1, help="# Reference particles of SGA")
     parser.add_argument("--normalize", action="store_true", help="Whether to normalize drift")
@@ -247,7 +290,6 @@ def parse_args():
     # NOTE: TAU moved to dt
     # parser.add_argument("--tau", type=float, default=0.2, help="Tau Hyperparameter of EGICBO")
     parser.add_argument("--hess", action="store_true", help="Extrapolate using Hessian? (EGICBO)")
-
 
     return parser.parse_args()
 
@@ -280,11 +322,15 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Set up the environment and model
-    env = gym.make(args.env)
+    env = gym.make(args.env, render_mode="rgb_array")
+
+    print(env.observation_space.shape)
 
     input_dim = env.observation_space.shape[0]
-    n_actions = env.action_space.n
-
+    try:
+        n_actions = env.action_space.n
+    except AttributeError:
+        n_actions = env.action_space.shape[0]
 
 
     if args.gradient:
@@ -392,10 +438,12 @@ def main(args):
     # Hyperparameters TODO make argparse args
     num_episodes = args.episodes
     epochs = args.epochs
+
     # NOTE: try not to fiddle with hyperparams that are relatively
     # orthogonal to the kind of optimizer used
+
     update_interval = 128
-    epsilon = 0.2
+    epsilon = 0.02
     gamma = 0.99
 
     #  ----- Train the model -----

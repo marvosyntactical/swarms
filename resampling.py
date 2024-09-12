@@ -78,7 +78,7 @@ class loss_update_resampling:
         self.wait_thresh = wait_thresh
 
     def __call__(self, swarm):
-        # NOTE: M dimension ignored; only implemented for M=1 swarm
+        # NOTE: M dimension/indexing dim ignored; only implemented for M=1 swarm
         self.wait += 1
         u_idx = swarm.get_best() < self.best_energy # has the swarm improved?
         self.wait[u_idx] = 0 # reset counter if swarm improved

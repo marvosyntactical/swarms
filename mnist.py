@@ -38,46 +38,6 @@ class Perceptron(nn.Module):
         x = F.log_softmax(x, dim=1)
         return x
 
-class SmallLinear(nn.Module):
-    def __init__(self):
-        super(SmallLinear, self).__init__()
-        self.flatten = nn.Flatten()
-        self.fc1 = nn.Linear(28 * 28, 100)
-        self.sigmoid = nn.Sigmoid()
-        self.fc2 = nn.Linear(100, 10)
-
-    def forward(self, x):
-        x = self.flatten(x)
-        x = self.sigmoid(self.fc1(x))
-        x = self.fc2(x)
-        x = F.log_softmax(x, dim=1)
-        return x
-
-class ConvNet(nn.Module):
-    def __init__(self):
-        super(ConvNet, self).__init__()
-        self.conv1 = nn.Conv2d(1, 32, 3, 1)
-        self.conv2 = nn.Conv2d(32, 64, 3, 1)
-        self.dropout1 = nn.Dropout2d(0.25)
-        self.dropout2 = nn.Dropout2d(0.5)
-        self.fc1 = nn.Linear(9216, 128)
-        self.fc2 = nn.Linear(128, 10)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = F.relu(x)
-        x = self.conv2(x)
-        x = F.relu(x)
-        x = F.max_pool2d(x, 2)
-        x = self.dropout1(x)
-        x = torch.flatten(x, 1)
-        x = self.fc1(x)
-        x = F.relu(x)
-        x = self.dropout2(x)
-        x = self.fc2(x)
-        output = F.log_softmax(x, dim=1)
-        return output
-
 def freqs(t):
     fs = {}
     n = t.nelement()
@@ -106,17 +66,16 @@ def preprocess():
 def parse_args():
     parser = argparse.ArgumentParser(description="Swarm Experiments on MNIST")
 
-    parser.add_argument("--gradient", action="store_true", help="Use Adam Baseline")
+    parser.add_argument("--gradient", action="store_true", help="Use Adam Baseline.")
     parser.add_argument("--optim", type=str, default="sga",
         choices=[
             "cbo",
             "egi",
             "pso",
-            "sg",
             "sga",
             "pla",
         ],
-        help="The 0th order Optim to use"
+        help="The 0th order Optim to use."
     )
     parser.add_argument("--N", type=int, default=10, help="Number of Particles")
 
@@ -130,16 +89,18 @@ def parse_args():
     parser.add_argument("--c1", type=float, default=1.0, help="c1 Hyperparameter of optimizer")
     parser.add_argument("--c2", type=float, default=1.0, help="c2 Hyperparameter of optimizer")
     parser.add_argument("--inertia", type=float, default=0.1, help="Inertia Hyperparam")
-    parser.add_argument("--do-momentum", action="store_true", help="Whether to use momentum update")
     parser.add_argument("--resample", type=int, default=40, help="Resample if swarm has not improved for this many updates. Negative for no resampling.")
 
+    # Momentum
+    parser.add_argument("--do-momentum", action="store_true", help="Whether to use momentum update")
+    parser.add_argument("--beta1", type=float, default=0.7, help="Beta1 Hyperparameter of SGA")
+    parser.add_argument("--beta2", type=float, default=0.9, help="Beta2 Hyperparameter of SGA")
+
     # SGA
-    parser.add_argument("--beta1", type=float, default=0.9, help="Beta1 Hyperparameter of SGA")
-    parser.add_argument("--beta2", type=float, default=0.99, help="Beta2 Hyperparameter of SGA")
     parser.add_argument("--lr", type=float, default=1.0, help="Optional learning rate of SGA")
     parser.add_argument("--K", type=int, default=1, help="# Reference particles of SGA")
     parser.add_argument("--normalize", action="store_true", help="Whether to normalize drift")
-    parser.add_argument("--sub-swarms", type=int, default=1, help="Number of sub swarms (flat hierachy)")
+    parser.add_argument("--sub", type=int, default=1, help="Number of sub swarms (flat hierachy). Must divide --N evenly.")
 
     # CBO
     parser.add_argument("--lamda", type=float, default=1.0, help="Lambda Hyperparameter of CBO")
@@ -273,7 +234,7 @@ def main(args):
                 do_momentum=args.do_momentum,
                 post_process=lambda cbo: rs(cbo),
                 normalize=args.normalize,
-                sub_swarms=args.sub_swarms
+                sub_swarms=args.sub
             )
             run["parameters/c1"] = args.c1
             run["parameters/c2"] = args.c2
@@ -284,7 +245,7 @@ def main(args):
             run["parameters/do_momentum"] = args.do_momentum
             run["parameters/normalize"] = args.normalize
             run["parameters/resample"] = args.resample
-            run["parameters/sub_swarms"] = args.sub_swarms
+            run["parameters/sub_swarms"] = args.sub
 
         elif opt == "pla":
             optimizer = PlanarSwarm(
