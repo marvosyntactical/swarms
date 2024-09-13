@@ -197,7 +197,7 @@ def train_ppo(env, model, optimizer, num_episodes, update_interval, epochs, epsi
         print(f"Episode {episode}, Total Reward: {total_reward}, Steps: {step}")
 
         if episode and episode % 50 == 0:
-            for testrun in range(1):
+            for testrun in range(0): # NOTE deactivate viz
                 reward = visualize_episode(env, model, device)
                 print(f"Visualized Test Run {testrun}, Total Reward {reward}")
 
