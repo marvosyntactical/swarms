@@ -1,5 +1,5 @@
 data/*
 __pycache__/*
 out-shakespeare-char/*
-.neptune
+.neptune_tok
 .THOUGHTS.md
