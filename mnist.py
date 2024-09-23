@@ -77,9 +77,9 @@ def parse_args():
         ],
         help="The 0th order Optim to use."
     )
-    parser.add_argument("--N", type=int, default=10, help="Number of Particles")
+    parser.add_argument("--N", type=int, default=50, help="Number of Particles")
 
-    parser.add_argument("--epo", type=int, default=1, help="Number of Epochs")
+    parser.add_argument("--epo", type=int, default=10, help="Number of Epochs")
     parser.add_argument("--stop", type=int, default=1e15, help="Alternatively, stop after this number of batches")
 
     parser.add_argument("--neptune", action="store_true", help="Log to Neptune?")

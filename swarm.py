@@ -79,9 +79,9 @@ class Swarm(optim.Optimizer):
 
     def update_swarm(self):
         """
-        The Swarm Optimizer's Logic
+        The Swarm Optimizer's Logic. Updates self.X based on self.current_losses.
         """
-        raise NotImplementedError
+        raise NotImplementedError(f"This must be implemented by classes inheriting from Swarm.")
 
 
     def step(
@@ -93,8 +93,8 @@ class Swarm(optim.Optimizer):
 
         with torch.no_grad():
 
-            required = loss_fn, model, x
-            assert None not in required, required
+            # required = loss_fn, model, x
+            # assert None not in required, required
 
             def get_loss(inp, X):
                 pprop = self.pprop
@@ -147,7 +147,6 @@ class PSO(Swarm):
         self.lr = 1.0
 
         self.do_momentum = do_momentum
-
 
     def get_best(self):
         return torch.argmin(self.pbests_y)
@@ -553,7 +552,7 @@ class EGICBO(Swarm):
 
         # NOTE figure out if applying lambda here is problematic
         # if lambda != 1.0
-        Vdet = self.lambda_ * drift - self.kappa * g
+        Vdet = self.lambda_ * drift + self.kappa * g
 
         Vrnd = (self.dt**.5) * self.sigma * diffusion
 
@@ -630,56 +629,4 @@ if __name__ == "__main__":
     main(sys.argv[1:])
 
 
-# 1. How do I implement backpropagation using these 0 ord algorithms?
-# 2. Can I expect a benefit from that as opposed to these direct approximations of the full gradient? Would I need to use an ensemble of particles per layer?
-# 3. Please formulate rigorously the difference between update mechanisms of the above type (i.e. self.X += self.V, where X are the entire network parameters) vs. backpropagation (i.e. chain rule)
 
-# 1. Implementing backpropagation using zero-order algorithms:
-# To implement backpropagation using zero-order algorithms, you would need to:
-# a) Compute loss for each particle
-# b) Estimate gradients using finite differences or other zero-order methods
-# c) Update particles based on estimated gradients
-# d) Propagate updates through layers
-
-# 2. Benefits and considerations:
-# - Zero-order methods may be less efficient than analytical gradients
-# - Ensemble per layer could improve accuracy but increase computational cost
-# - Direct approximations might be more suitable for certain architectures
-
-# 3. Difference between update mechanisms:
-# - Current approach (self.X += self.V):
-#   Updates all parameters simultaneously based on particle dynamics
-# - Backpropagation:
-#   Updates parameters layer-by-layer using chain rule
-#   Computes exact gradients analytically
-#   More efficient for deep networks due to gradient reuse
-
-# Implementing backpropagation-like updates:
-
-# def backprop_like_update(self):
-#     # Estimate gradients for each layer
-#     layer_grads = self.estimate_layer_gradients()
-#     
-#     # Update parameters layer by layer
-#     for layer, grad in layer_grads.items():
-#         self.X[:, self.pprop[layer][-2]:self.pprop[layer][-1]] -= self.lr * grad
-# 
-# def estimate_layer_gradients(self):
-#     # Implement zero-order gradient estimation for each layer
-#     # This could use finite differences or other methods
-#     layer_grads = {}
-#     for layer in self.pprop:
-#         # Estimate gradient for this layer
-#         layer_grads[layer] = self.zero_order_gradient_estimate(layer)
-#     return layer_grads
-# 
-# def zero_order_gradient_estimate(self, layer):
-#     # Implement zero-order gradient estimation for a single layer
-#     # This is a placeholder and would need to be implemented based on
-#     # the specific zero-order method chosen
-#     pass
-
-# Note: This approach would require significant changes to the current
-# structure and might not fully leverage the benefits of swarm algorithms.
-# A hybrid approach combining swarm dynamics with layer-wise updates
-# could potentially offer a balance between exploration and efficiency.
