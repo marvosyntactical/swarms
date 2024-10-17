@@ -68,4 +68,10 @@
 
 
 
+# Notes 17.10.
+
+* [TODO] zeige dass wenn konvex, lösung gefunden wird
+* [TODO] kleines convnet trainieren
+* [TODO] glatte nichtlinearität
+* [DONE] versuche learning rate scheduler => python3 bench.py ... --sched plat --sched-hyper 20 gut!, oder: --sched cos --sched-hyper 1e3 
 

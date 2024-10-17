@@ -37,6 +37,15 @@ class Swarm(optim.Optimizer):
         self.pbests_x = self.X
         self.pbests_y = torch.Tensor([float("inf") for _ in range(self.N)]).to(self.X.device)
 
+        # unnecessary:
+        self.current_losses = self.pbests_y.clone()
+
+    def set_lr(self, new_lr):
+        if not hasattr(self, "lr"):
+            raise AttributeError(f"This Optimizer does not have a .lr attribute")
+        else:
+            self.lr = new_lr
+
     def update_bests(self):
         # NOTE: This could be done with torch.where
         for i in range(self.N):
@@ -141,8 +150,8 @@ class PSO(Swarm):
         self.inertia = inertia
 
         # NOTE dummy, add as arguments
-        self.beta1 = 0.9
-        self.beta2 = 0.99
+        self.beta1 = 0.7
+        self.beta2 = 0.9
         self.t = 1
         self.lr = 1.0
 
@@ -171,7 +180,7 @@ class PSO(Swarm):
             mthat = V/(1-self.beta1**t)
             vthat = A/(1-self.beta2**t)
 
-            update = self.lr * (mthat / (torch.sqrt(vthat) + 1e-6))
+            update = self.lr * (mthat / (torch.sqrt(vthat) + 1e-9))
 
             self.A = A
             self.V = V
@@ -204,7 +213,7 @@ class SwarmGradAccel(Swarm):
             device: torch.device = "cpu",
             do_momentum: bool = True,
             post_process: Callable = lambda s: None,
-            normalize: bool = True,
+            normalize: int = 0,
             sub_swarms: int = 1,
         ):
         super(SwarmGradAccel, self).__init__(models, device, post_process=post_process)
@@ -253,12 +262,11 @@ class SwarmGradAccel(Swarm):
         return ref
 
 
-
     def update_swarm(self):
         t = self.t
         if t == 1000:
             # print("="*30)
-            # print("SUB SWARMS MERGED")
+            print("SUB SWARMS MERGED")
             self.merged = True
 
         Vref = torch.zeros_like(self.X)
@@ -270,22 +278,22 @@ class SwarmGradAccel(Swarm):
             # vector pointing to reference particle
             Hk = self.X[ref_k] - self.X
             if self.normalize:
-                Hk /= torch.linalg.norm(Hk, dim=-1).unsqueeze(-1) + 1e-5
+                Hk /= torch.linalg.norm(Hk, dim=-1).unsqueeze(-1)**self.normalize + 1e-9
 
             # difference in loss 
             fdiffk = self.current_losses - self.current_losses[ref_k]
             # leaky relu decreases difference if particle is already better than reference
             # so we dont move too much in the opposite direction
             F.leaky_relu(fdiffk, negative_slope=self.leak, inplace=True)
+            # fdiffk = F.gelu(fdiffk) # NOTE TODO TEST REMOVE ME FIXME
             fdiffk.unsqueeze_(-1)
 
             Vref += fdiffk * Hk
 
         Vref /= self.K
 
-        # r1 = torch.rand(*self.X.shape).to(self.X.device) # U[0,1]
         r1 = 1.0 # NOTE TODO TEST REMOVE
-        # r1 = torch.rand(*self.X.shape).to(self.X.device) # NOTE TODO TEST REMOVE
+        # r1 = torch.rand(*self.X.shape).to(self.X.device) # U[0,1]
         r2 = torch.randn(*self.X.shape).to(self.X.device) # N(0,1)
 
         Vrnd = r2 * self.c2
@@ -299,7 +307,7 @@ class SwarmGradAccel(Swarm):
             mthat = V/(1-self.beta1**t)
             vthat = A/(1-self.beta2**t)
 
-            update = self.lr * self.c1 * r1 * (mthat / (torch.sqrt(vthat) + 1e-6)) + Vrnd
+            update = self.lr * self.c1 * r1 * (mthat / (torch.sqrt(vthat) + 1e-9)) + Vrnd
 
             self.A = A
             self.V = V
@@ -312,13 +320,12 @@ class SwarmGradAccel(Swarm):
 
         self.t += 1
 
+
     def stats(self):
         avgV = torch.mean(torch.linalg.norm(self.V, dim=-1)).item()
         avgA = torch.mean(torch.linalg.norm(self.A, dim=-1)).item()
 
         return {"avg_v_norm": avgV, "avg_a_norm": avgA}
-
-
 
 
 class CBO(Swarm):
@@ -385,7 +392,7 @@ class CBO(Swarm):
             mthat = V/(1-self.beta1**t)
             vthat = A/(1-self.beta2**t)
 
-            update = self.lr * self.lambda_ * self.dt * (mthat / (torch.sqrt(vthat) + 1e-6)) + Vrnd
+            update = self.lr * self.lambda_ * self.dt * (mthat / (torch.sqrt(vthat) + 1e-9)) + Vrnd
 
             self.A = A
             self.V = V
@@ -564,7 +571,7 @@ class EGICBO(Swarm):
             mthat = V/(1-self.beta1**t)
             vthat = A/(1-self.beta2**t)
 
-            update = self.dt * (mthat / (torch.sqrt(vthat) + 1e-6)) + Vrnd
+            update = self.dt * (mthat / (torch.sqrt(vthat) + 1e-9)) + Vrnd
 
             self.A = A
             self.V = V

@@ -6,10 +6,21 @@ import contextlib
 from pprint import pprint
 
 from swarm import Swarm, PSO, SwarmGradAccel, CBO, EGICBO, PlanarSwarm
+from scheduler import *
 import resampling as rsmp
 
 import argparse
 import neptune
+
+def time(optimizer, model, data_loader, n):
+    import timeit
+
+    for data, target in data_loader:
+        break
+
+    t = timeit.timeit(lambda: optimizer.step(model, data, lambda out: F.nll_loss(out,target)), number=n) / n
+
+    print(f"Average step time for Optimizer: {t:.6f} seconds")
 
 
 class Perceptron(nn.Module):
@@ -97,9 +108,10 @@ def parse_args():
     parser.add_argument("--beta2", type=float, default=0.9, help="Beta2 Hyperparameter of SGA")
 
     # SGA
+    parser.add_argument("--leak", type=float, default=0.1, help="Leak of SGA")
     parser.add_argument("--lr", type=float, default=1.0, help="Optional learning rate of SGA")
     parser.add_argument("--K", type=int, default=1, help="# Reference particles of SGA")
-    parser.add_argument("--normalize", action="store_true", help="Whether to normalize drift")
+    parser.add_argument("--normalize", type=int, default=0, help="Whether to normalize drift by h**norm")
     parser.add_argument("--sub", type=int, default=1, help="Number of sub swarms (flat hierachy). Must divide --N evenly.")
 
     # CBO
@@ -114,8 +126,21 @@ def parse_args():
     parser.add_argument("--slack", type=float, default=10., help="Slack Hyperparameter of EGICBO")
     # NOTE: TAU moved to dt
     # parser.add_argument("--tau", type=float, default=0.2, help="Tau Hyperparameter of EGICBO")
-    parser.add_argument("--hess", action="store_true", help="Extrapolate using Hessian? (EGICBO)")
+    parser.add_argument("--hess", action="store_true", help="Extrapolate using Hessian (currently intractable)? (EGICBO)")
 
+    parser.add_argument("--timeit", type=int, default=-1, help="If > 0, avg execution time of optimizer.step() over this many executions")
+
+    # Scheduler
+    parser.add_argument("--sched", type=str, default="none", help="Scheduler Class used.",
+        choices=[
+            "none",
+            "step",
+            "exp",
+            "cos",
+            "plat",
+        ]
+    )
+    parser.add_argument("--sched-hyper", type=float, default=.1, help="Scheduler Hyperparameter")
 
     return parser.parse_args()
 
@@ -229,6 +254,7 @@ def main(args):
                 c2=args.c2,
                 beta1=args.beta1,
                 beta2=args.beta2,
+                leak=args.leak,
                 lr=args.lr,
                 K=args.K,
                 do_momentum=args.do_momentum,
@@ -240,6 +266,7 @@ def main(args):
             run["parameters/c2"] = args.c2
             run["parameters/beta1"] = args.beta1
             run["parameters/beta2"] = args.beta2
+            run["parameters/leak"] = args.leak
             run["parameters/lr"] = args.lr
             run["parameters/K"] = args.K
             run["parameters/do_momentum"] = args.do_momentum
@@ -254,6 +281,25 @@ def main(args):
         else:
             raise NotImplementedError(f"Optim={opt}")
 
+        # SCHEDULER
+        run["parameters/scheduler"] = args.sched
+        run["parameters/sched_hyper"] = args.sched_hyper
+
+        if args.sched == "none":
+            scheduler = NoScheduler(optimizer)
+        elif args.sched == "cos":
+            scheduler = CosineAnnealingLR(optimizer, args.sched_hyper) # T_max
+        elif args.sched == "exp":
+            scheduler = ExponentialLR(optimizer, args.sched_hyper) # gamma
+        elif args.sched == "step":
+            scheduler = StepLR(optimizer, args.sched_hyper) # step_size
+        elif args.sched == "plat":
+            scheduler = ReduceLROnPlateau(optimizer, patience=args.sched_hyper) # patience
+        else:
+            raise NotImplementedError(f"Scheduler {args.sched} not implemented.")
+
+
+
     # Prep Data
     transform, train_dataset, test_dataset, train_loader, test_loader = preprocess()
 
@@ -261,6 +307,9 @@ def main(args):
 
     # Dont compute gradients in case of Swarm optimizer
     train_context = torch.no_grad if not args.gradient else contextlib.nullcontext
+
+    if args.timeit > 0:
+        time(optimizer, model, train_loader, args.timeit)
 
     with train_context():
         for epoch in range(args.epo):
@@ -284,6 +333,11 @@ def main(args):
                         data,
                         lambda out: F.nll_loss(out, target)
                     )
+
+                    if isinstance(scheduler, ReduceLROnPlateau):
+                        scheduler.step(loss)
+                    else:
+                        scheduler.step()
 
                     if args.neptune:
                         for stat, val in optimizer.stats().items():

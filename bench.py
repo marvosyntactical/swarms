@@ -6,6 +6,7 @@ import contextlib
 from pprint import pprint
 
 from swarm import Swarm, PSO, SwarmGradAccel, CBO, EGICBO, PlanarSwarm
+from scheduler import *
 import resampling as rsmp
 
 import argparse
@@ -21,14 +22,16 @@ class ObjectiveFunction(nn.Module):
     def __call__(self, x):
         return self.func(self.param)
 
-# Define some example objective functions
+
 def rastrigin(x):
     return 10 * len(x) + torch.sum(x**2 - 10 * torch.cos(2 * torch.pi * x))
+
 
 def ackley(x):
     n = len(x)
     return -20 * torch.exp(-0.2 * torch.sqrt(torch.sum(x**2) / n)) - \
            torch.exp(torch.sum(torch.cos(2 * torch.pi * x)) / n) + 20 + torch.e
+
 
 def xsy4(x):
     sines = torch.sum(torch.sin(x)**2)
@@ -36,9 +39,16 @@ def xsy4(x):
     squares = torch.sum(torch.sin(torch.sqrt(torch.sqrt(x**2)))**2)
     return (sines - torch.exp(-squares)) * torch.exp(-sinesqrts)
 
+
+def griewank(x):
+    summands = torch.linalg.norm(x)**2
+    div = (torch.arange(len(x))+1)**.5
+    factors = torch.prod(torch.cos(x/div))
+    return 1 + summands/4000 + factors
+
+
 def sphere(x):
     return torch.linalg.norm(x)**2
-
 
 
 def parse_args():
@@ -61,14 +71,15 @@ def parse_args():
             "rastrigin",
             "xsy4",
             "sphere",
+            "griewank",
         ],
         help="The function to optimize."
     )
     parser.add_argument("--N", type=int, default=50, help="Number of Particles")
     parser.add_argument("--dim", type=int, default=100, help="Number of Dimensions")
-    parser.add_argument("--iterations", type=float, default=1e3, help="Number of Steps to do.")
+    parser.add_argument("--iterations", type=float, default=5e3, help="Number of Steps to do.")
     parser.add_argument("--std", type=float, default=5., help="Standard Deviation of Init Normal")
-    parser.add_argument("--mean", type=int, default=85, help="Init location is [mean, ..., mean].")
+    parser.add_argument("--means", nargs="+", type=float, default=[85.], help="Init location for subswarm i is [means[i], ..., mean[i]].")
 
     parser.add_argument("--neptune", action="store_true", help="Log to Neptune?")
 
@@ -87,8 +98,9 @@ def parse_args():
     # SGA
     parser.add_argument("--lr", type=float, default=1.0, help="Optional learning rate of SGA")
     parser.add_argument("--K", type=int, default=1, help="# Reference particles of SGA")
-    parser.add_argument("--normalize", action="store_true", help="Whether to normalize drift")
+    parser.add_argument("--normalize", type=int, default=0, help="Whether to normalize drift by h**norm")
     parser.add_argument("--sub", type=int, default=1, help="Number of sub swarms (flat hierachy). Must divide --N evenly.")
+    parser.add_argument("--leak", type=float, default=0.1, help="Leak slope of Leaky Relu in SGA")
 
     # CBO
     parser.add_argument("--lamda", type=float, default=1.0, help="Lambda Hyperparameter of CBO")
@@ -103,6 +115,18 @@ def parse_args():
     # NOTE: TAU moved to dt
     # parser.add_argument("--tau", type=float, default=0.2, help="Tau Hyperparameter of EGICBO")
     parser.add_argument("--hess", action="store_true", help="Extrapolate using Hessian? (EGICBO)")
+
+    # Scheduler
+    parser.add_argument("--sched", type=str, default="none", help="Scheduler Class used.",
+        choices=[
+            "none",
+            "step",
+            "exp",
+            "cos",
+            "plat",
+        ]
+    )
+    parser.add_argument("--sched-hyper", type=float, default=.1, help="Scheduler Hyperparameter")
 
 
     return parser.parse_args()
@@ -142,8 +166,10 @@ def main(args):
     else:
         objective = eval(args.objective) # NOTE super unsafe, switch to dict
 
-        offset = torch.Tensor([args.mean]*args.dim)
-        models = [ObjectiveFunction(objective, args.dim, offset, args.std) for _ in range(args.N)]
+        assert len(args.means) == args.sub, (args.means, args.sub)
+        offsets = [torch.Tensor([args.means[i]]*args.dim) for i in range(args.sub)]
+        subswarm = lambda prtcl: int(prtcl//(args.N/args.sub))
+        models = [ObjectiveFunction(objective, args.dim, offsets[subswarm(prtcl)], args.std) for prtcl in range(args.N)]
         model = models[0]
 
         if args.resample >= 0:
@@ -214,6 +240,7 @@ def main(args):
                 beta2=args.beta2,
                 lr=args.lr,
                 K=args.K,
+                leak=args.leak,
                 do_momentum=args.do_momentum,
                 post_process=lambda cbo: rs(cbo),
                 normalize=args.normalize,
@@ -224,6 +251,7 @@ def main(args):
             run["parameters/beta1"] = args.beta1
             run["parameters/beta2"] = args.beta2
             run["parameters/lr"] = args.lr
+            run["parameters/leak"] = args.leak
             run["parameters/K"] = args.K
             run["parameters/do_momentum"] = args.do_momentum
             run["parameters/normalize"] = args.normalize
@@ -237,6 +265,22 @@ def main(args):
         else:
             raise NotImplementedError(f"Optim={opt}")
 
+        # SCHEDULER
+        run["parameters/scheduler"] = args.sched
+        run["parameters/sched_hyper"] = args.sched_hyper
+
+        if args.sched == "none":
+            scheduler = NoScheduler(optimizer)
+        elif args.sched == "cos":
+            scheduler = CosineAnnealingLR(optimizer, args.sched_hyper) # T_max
+        elif args.sched == "exp":
+            scheduler = ExponentialLR(optimizer, args.sched_hyper) # gamma
+        elif args.sched == "step":
+            scheduler = StepLR(optimizer, args.sched_hyper) # step_size
+        elif args.sched == "plat":
+            scheduler = ReduceLROnPlateau(optimizer, patience=args.sched_hyper) # patience
+        else:
+            raise NotImplementedError(f"Scheduler {args.sched} not implemented.")
 
     # Dont compute gradients in case of Swarm optimizer
     train_context = torch.no_grad if not args.gradient else contextlib.nullcontext
@@ -255,12 +299,16 @@ def main(args):
 
                 optimizer.step()
             else:
-                dummy = torch.Tensor([0,42])
+                dummy = torch.Tensor([42])
                 loss = optimizer.step(
                     model,
                     dummy,
                     lambda x: x,
                 )
+                if isinstance(scheduler, ReduceLROnPlateau):
+                    scheduler.step(loss)
+                else:
+                    scheduler.step()
 
                 if args.neptune:
                     for stat, val in optimizer.stats().items():
@@ -270,7 +318,7 @@ def main(args):
                 run["train/loss"].append(loss.item())
 
             norm = torch.linalg.norm(model.param).item()
-            print(f"Train Iteration:\t{it}/{int(args.iterations)}\t({loss.item():.4f})\t{norm:.4f}")
+            print(f"Iter:\t{it}/{int(args.iterations)}\tLoss:\t({loss.item():.4f})\tNorm:\t{norm:.4f}")
 
     if args.neptune:
         run.stop()
