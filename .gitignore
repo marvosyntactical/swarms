@@ -4,3 +4,4 @@ out-shakespeare-char/*
 .neptune_tok
 .neptune/*
 .THOUGHTS.md
+gpt/*
