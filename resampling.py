@@ -71,9 +71,9 @@ class loss_update_resampling:
     The indices of the runs to resample as a numpy array.
     """
 
-    def __init__(self, M: int, wait_thresh: int = 5):
+    def __init__(self, M: int, wait_thresh: int = 5, device="cpu"):
         self.M = M
-        self.best_energy = float('inf') * torch.ones((self.M,))
+        self.best_energy = float('inf') * torch.ones((self.M,)).to(device)
         self.wait = torch.zeros((self.M,), dtype=int)
         self.wait_thresh = wait_thresh
 

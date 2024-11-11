@@ -12,10 +12,12 @@ import resampling as rsmp
 import argparse
 import neptune
 
-def time(optimizer, model, data_loader, n):
+
+def time(optimizer, model, data_loader, n, device):
     import timeit
 
     for data, target in data_loader:
+        data, target = data.to(device), target.to(device)
         break
 
     t = timeit.timeit(lambda: optimizer.step(model, data, lambda out: F.nll_loss(out,target)), number=n) / n
@@ -115,6 +117,7 @@ def parse_args():
     parser.add_argument("--stop", type=int, default=1e15, help="End Epochs after this number of batches")
 
     parser.add_argument("--neptune", action="store_true", help="Log to Neptune?")
+    parser.add_argument("--gpu", action="store_true", help="Try to use CUDA?")
 
     # ==== Optimizer Specific Hyperparameters ====
 
@@ -180,6 +183,7 @@ def init_neptune(args):
     run["parameters/N"] = args.N
     run["parameters/epochs"] = args.epo
     run["parameters/stop"] = args.stop
+    run["parameters/gpu"] = args.gpu
 
     return run
 
@@ -203,20 +207,24 @@ def main(args):
 
     # model_class = SmallLinear
 
+    device = torch.device("cuda" if args.gpu and torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
     if args.gradient:
-        model = model_class()
+        model = model_class().to(device)
         optimizer = torch.optim.Adam(
             model.parameters(),
             lr=0.01,
         )
 
     else:
-        models = [model_class(sizes=[28*28,100,10]) for _ in range(args.N)]
+        models = [model_class(sizes=[28*28,100,10]).to(device) for _ in range(args.N)]
         # models = [model_class() for _ in range(args.N)]
         model = models[0]
 
         if args.resample >= 0:
-            rs = rsmp.resampling([rsmp.loss_update_resampling(M=1, wait_thresh=args.resample)], 1)
+            rs = rsmp.resampling([rsmp.loss_update_resampling(M=1, wait_thresh=args.resample,
+                device=device)], 1)
         else:
             rs = lambda s: None
         opt = args.optim
@@ -230,7 +238,8 @@ def main(args):
                 noise_type=args.noise,
                 post_process=lambda cbo: rs(cbo),
                 do_momentum=args.do_momentum,
-                temp=args.temp
+                temp=args.temp,
+                device=device,
             )
             run["parameters/lambda"] = args.lamda
             run["parameters/sigma"] = args.sigma
@@ -243,6 +252,7 @@ def main(args):
         elif opt == "pso":
             optimizer = PSO(
                 models,
+                device=device,
                 c1=args.c1,
                 c2=args.c2,
                 inertia=args.inertia,
@@ -255,6 +265,7 @@ def main(args):
 
             optimizer = EGICBO(
                 models,
+                device=device,
                 lambda_=args.lamda,
                 sigma=args.sigma,
                 noise_type=args.noise,
@@ -277,6 +288,7 @@ def main(args):
 
             optimizer = SwarmGradAccel(
                 models,
+                device=device,
                 c1=args.c1,
                 c2=args.c2,
                 beta1=args.beta1,
@@ -304,6 +316,7 @@ def main(args):
         elif opt == "pla":
             optimizer = PlanarSwarm(
                 models,
+                device=device,
             )
         else:
             raise NotImplementedError(f"Optim={opt}")
@@ -336,12 +349,13 @@ def main(args):
     train_context = torch.no_grad if not args.gradient else contextlib.nullcontext
 
     if args.timeit > 0:
-        time(optimizer, model, train_loader, args.timeit)
+        time(optimizer, model, train_loader, args.timeit, device)
 
     with train_context():
         for epoch in range(args.epo):
             model.train()
             for batch_idx, (data, target) in enumerate(train_loader):
+                data, target = data.to(device), target.to(device)
 
                 if batch_idx > args.stop:
                     break
@@ -385,6 +399,7 @@ def main(args):
             correct = 0
 
             for data, target in test_loader:
+                data, target = data.to(device), target.to(device)
                 output = model(data)
                 test_loss += F.nll_loss(output, target, reduction='sum').item()
                 pred = output.argmax(dim=1, keepdim=True)
