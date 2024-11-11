@@ -24,7 +24,8 @@ class ObjectiveFunction(nn.Module):
 
 
 def rastrigin(x):
-    return 10 * len(x) + torch.sum(x**2 - 10 * torch.cos(2 * torch.pi * x))
+    A = 10
+    return A * len(x) + torch.sum(x**2 - A * torch.cos(2 * torch.pi * x))
 
 
 def ackley(x):

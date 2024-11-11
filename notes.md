@@ -70,8 +70,9 @@
 
 # Notes 17.10.
 
-* [TODO] zeige dass wenn konvex, lösung gefunden wird
-* [TODO] kleines convnet trainieren
-* [TODO] glatte nichtlinearität
+* [DONE] kleines convnet trainieren => ADAM erreicht 98% (92% mlp), SGA erreicht 14% (70% mlp) (alles nach 1 epoche)
+* [DONE] glatte nichtlinearität => marginal change
 * [DONE] versuche learning rate scheduler => python3 bench.py ... --sched plat --sched-hyper 20 gut!, oder: --sched cos --sched-hyper 1e3 
+* [TODO] zeige dass wenn konvex, lösung gefunden wird
+
 

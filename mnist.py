@@ -23,6 +23,21 @@ def time(optimizer, model, data_loader, n):
     print(f"Average step time for Optimizer: {t:.6f} seconds")
 
 
+class SmallConvNet(nn.Module):
+    def __init__(self, sizes=None):
+        super(SmallConvNet, self).__init__()
+        self.conv1 = nn.Conv2d(1, 8, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(8, 16, kernel_size=3, stride=1, padding=1)
+        self.fc = nn.Linear(7 * 7 * 16, 10)
+
+    def forward(self, x):
+        x = F.relu(F.max_pool2d(self.conv1(x), 2))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2))
+        x = x.view(-1, 7 * 7 * 16)
+        x = self.fc(x)
+        return F.log_softmax(x, dim=1)
+
+
 class Perceptron(nn.Module):
     # taken from https://github.com/PdIPS/CBXpy/blob/main/docs/examples/nns/models.py
     def __init__(self, mean = 0.0, std = 1.0,
@@ -78,6 +93,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Swarm Experiments on MNIST")
 
     parser.add_argument("--gradient", action="store_true", help="Use Adam Baseline.")
+    parser.add_argument("--arch", type=str, default="mlp",
+        choices=[
+            "mlp",
+            "conv",
+        ]
+    )
     parser.add_argument("--optim", type=str, default="sga",
         choices=[
             "cbo",
@@ -91,7 +112,7 @@ def parse_args():
     parser.add_argument("--N", type=int, default=50, help="Number of Particles")
 
     parser.add_argument("--epo", type=int, default=10, help="Number of Epochs")
-    parser.add_argument("--stop", type=int, default=1e15, help="Alternatively, stop after this number of batches")
+    parser.add_argument("--stop", type=int, default=1e15, help="End Epochs after this number of batches")
 
     parser.add_argument("--neptune", action="store_true", help="Log to Neptune?")
 
@@ -111,7 +132,7 @@ def parse_args():
     parser.add_argument("--leak", type=float, default=0.1, help="Leak of SGA")
     parser.add_argument("--lr", type=float, default=1.0, help="Optional learning rate of SGA")
     parser.add_argument("--K", type=int, default=1, help="# Reference particles of SGA")
-    parser.add_argument("--normalize", type=int, default=0, help="Whether to normalize drift by h**norm")
+    parser.add_argument("--normalize", type=int, default=0, help="Whether to normalize drift by h**normalize")
     parser.add_argument("--sub", type=int, default=1, help="Number of sub swarms (flat hierachy). Must divide --N evenly.")
 
     # CBO
@@ -173,7 +194,13 @@ def main(args):
 
 
     # Initialize the model and optimizer
-    model_class = Perceptron
+    if args.arch == "mlp":
+        model_class = Perceptron
+    elif args.arch == "conv":
+        model_class = SmallConvNet
+    else:
+        raise NotImplementedError(f"Architecture {args.arch}")
+
     # model_class = SmallLinear
 
     if args.gradient:
@@ -316,7 +343,7 @@ def main(args):
             model.train()
             for batch_idx, (data, target) in enumerate(train_loader):
 
-                if batch_idx+len(train_loader)*epoch > args.stop:
+                if batch_idx > args.stop:
                     break
 
                 if args.gradient:
