@@ -1,8 +1,7 @@
 data/*
 __pycache__/*
-out-shakespeare-char/*
 .neptune_tok
 .neptune/*
 .THOUGHTS.md
-gpt/*
 s/*
+gpt/out-shakespeakre-char/*
