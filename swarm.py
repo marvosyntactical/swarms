@@ -24,6 +24,7 @@ class Swarm(optim.Optimizer):
             device: torch.device = "cpu",
             post_process: Callable = lambda s: None,
         ):
+        self.device = device
 
         num_particles = len(models)
         self.N = num_particles
@@ -606,7 +607,6 @@ class EGICBO(Swarm):
 
 
 class PlanarSwarm(Swarm):
-
     def __init__(
             self,
             models: Iterable[nn.Module],

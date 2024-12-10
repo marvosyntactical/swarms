@@ -3,4 +3,5 @@ __pycache__/*
 .neptune_tok
 .neptune/*
 .THOUGHTS.md
+s/*
 gpt/out-shakespeakre-char/*
