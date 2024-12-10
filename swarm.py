@@ -6,6 +6,7 @@ from torchvision import datasets, transforms
 
 from typing import Union, Iterable, Dict, Any, Callable, Optional
 from collections import OrderedDict
+import contextlib
 
 import random
 from scipy.sparse.linalg import svds
@@ -100,7 +101,10 @@ class Swarm(optim.Optimizer):
             loss_fn: Callable, # must have signature model_output -> loss
         ):
 
-        with torch.no_grad():
+        # NOTE FIXME TODO THIS IS FOR PINN DEBUGGING; REMOVE THIS
+        ctx = torch.no_grad if 0 else contextlib.nullcontext
+
+        with ctx():
 
             # required = loss_fn, model, x
             # assert None not in required, required
