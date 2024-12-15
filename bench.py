@@ -5,9 +5,11 @@ from torchvision import datasets, transforms
 import contextlib
 from pprint import pprint
 
-from swarm import Swarm, PSO, SwarmGradAccel, CBO, EGICBO, PlanarSwarm
+from swarm import Swarm, PSO, SwarmGradAccel, CBO, EGICBO, PlanarSwarm, DiffusionEvolution
 from scheduler import *
 import resampling as rsmp
+
+from diffevo.fitnessmapping import *
 
 import argparse
 import neptune
@@ -17,7 +19,7 @@ class ObjectiveFunction(nn.Module):
         super(ObjectiveFunction, self).__init__()
         assert mean.shape[0] == dim, (mean.shape, dim)
         self.func = func
-        self.param = nn.Parameter(torch.randn(dim)*std+mean)
+        self.param = nn.Parameter(torch.randn(dim) * std + mean)
 
     def __call__(self, x):
         return self.func(self.param)
@@ -36,8 +38,8 @@ def ackley(x):
 
 def xsy4(x):
     sines = torch.sum(torch.sin(x)**2)
-    sinesqrts = torch.sum(x**2)
-    squares = torch.sum(torch.sin(torch.sqrt(torch.sqrt(x**2)))**2)
+    squares = torch.sum(x**2)
+    sinesqrts = torch.sum(torch.sin(torch.sqrt(torch.sqrt(x**2)))**2)
     return (sines - torch.exp(-squares)) * torch.exp(-sinesqrts)
 
 
@@ -63,6 +65,7 @@ def parse_args():
             "pso",
             "sga",
             "pla",
+            "dif",
         ],
         help="The 0th order Optim to use."
     )
@@ -80,7 +83,7 @@ def parse_args():
     parser.add_argument("--dim", type=int, default=100, help="Number of Dimensions")
     parser.add_argument("--iterations", type=float, default=5e3, help="Number of Steps to do.")
     parser.add_argument("--std", type=float, default=5., help="Standard Deviation of Init Normal")
-    parser.add_argument("--means", nargs="+", type=float, default=[85.], help="Init location for subswarm i is [means[i], ..., mean[i]].")
+    parser.add_argument("--means", nargs="+", type=float, default=[85.], help="Init location for subswarm i is [means[i], ..., means[i]].")
 
     parser.add_argument("--neptune", action="store_true", help="Log to Neptune?")
 
@@ -116,6 +119,13 @@ def parse_args():
     # NOTE: TAU moved to dt
     # parser.add_argument("--tau", type=float, default=0.2, help="Tau Hyperparameter of EGICBO")
     parser.add_argument("--hess", action="store_true", help="Extrapolate using Hessian? (EGICBO)")
+
+    # DIFF EVO
+    parser.add_argument("--num-steps", type=int, default=1000, help="Number of steps (DiffEvo)")
+    parser.add_argument("--temperature", type=float, default=0.0, help="If != 0, use Energy Mapping with this temp")
+    parser.add_argument("--ddim-noise", type=float, default=1.0, help="Noise of generator sample")
+    parser.add_argument("--l2", type=float, default=0.0, help="l2 penalty (DiffEvo)")
+    parser.add_argument("--latent", type=int, default=0, help="Latent dim of Latent DiffEvo (ignored if 0)")
 
     # Scheduler
     parser.add_argument("--sched", type=str, default="none", help="Scheduler Class used.",
@@ -262,6 +272,19 @@ def main(args):
         elif opt == "pla":
             optimizer = PlanarSwarm(
                 models,
+            )
+        elif opt == "dif":
+            if args.temperature:
+                fitness_mapping = Energy(temperature=args.temperature, l2_factor=args.l2)
+            else:
+                fitness_mapping = Identity(l2_factor=args.l2)
+
+            optimizer = DiffusionEvolution(
+                models,
+                num_steps=int(args.iterations),
+                noise=args.ddim_noise,
+                fitness_mapping=fitness_mapping,
+                latent_dim=args.latent if args.latent else None
             )
         else:
             raise NotImplementedError(f"Optim={opt}")

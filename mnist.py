@@ -5,9 +5,13 @@ from torchvision import datasets, transforms
 import contextlib
 from pprint import pprint
 
-from swarm import Swarm, PSO, SwarmGradAccel, CBO, EGICBO, PlanarSwarm
+from copy import deepcopy
+
+from swarm import Swarm, PSO, SwarmGradAccel, CBO, EGICBO, PlanarSwarm, DiffusionEvolution
 from scheduler import *
 import resampling as rsmp
+
+from diffevo.fitnessmapping import *
 
 import argparse
 import neptune
@@ -108,12 +112,14 @@ def parse_args():
             "pso",
             "sga",
             "pla",
+            "dif"
         ],
         help="The 0th order Optim to use."
     )
     parser.add_argument("--N", type=int, default=50, help="Number of Particles")
 
     parser.add_argument("--epo", type=int, default=10, help="Number of Epochs")
+    parser.add_argument("--switch", type=int, default=-1, help="Switch from 0 Order optimizer to Adam after this many batches")
     parser.add_argument("--stop", type=int, default=1e15, help="End Epochs after this number of batches")
 
     parser.add_argument("--neptune", action="store_true", help="Log to Neptune?")
@@ -151,6 +157,13 @@ def parse_args():
     # NOTE: TAU moved to dt
     # parser.add_argument("--tau", type=float, default=0.2, help="Tau Hyperparameter of EGICBO")
     parser.add_argument("--hess", action="store_true", help="Extrapolate using Hessian (currently intractable)? (EGICBO)")
+
+    # DIFF EVO
+    parser.add_argument("--num-steps", type=int, default=1000, help="Number of steps (DiffEvo)")
+    parser.add_argument("--temperature", type=float, default=0.0, help="If != 0, use Energy Mapping with this temp")
+    parser.add_argument("--ddim-noise", type=float, default=1.0, help="Noise of generator sample")
+    parser.add_argument("--l2", type=float, default=0.0, help="l2 penalty (DiffEvo)")
+    parser.add_argument("--latent", type=int, default=0, help="Latent dim of Latent DiffEvo (ignored if 0)")
 
     parser.add_argument("--timeit", type=int, default=-1, help="If > 0, avg execution time of optimizer.step() over this many executions")
 
@@ -210,14 +223,7 @@ def main(args):
     device = torch.device("cuda" if args.gpu and torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    if args.gradient:
-        model = model_class().to(device)
-        optimizer = torch.optim.Adam(
-            model.parameters(),
-            lr=0.01,
-        )
-
-    else:
+    if not args.gradient:
         models = [model_class(sizes=[28*28,100,10]).to(device) for _ in range(args.N)]
         # models = [model_class() for _ in range(args.N)]
         model = models[0]
@@ -230,7 +236,7 @@ def main(args):
         opt = args.optim
 
         if opt == "cbo":
-            optimizer = CBO(
+            optimizer0 = CBO(
                 models,
                 lambda_=args.lamda,
                 sigma=args.sigma,
@@ -250,7 +256,7 @@ def main(args):
             run["parameters/temp"] = args.temp
 
         elif opt == "pso":
-            optimizer = PSO(
+            optimizer0 = PSO(
                 models,
                 device=device,
                 c1=args.c1,
@@ -263,7 +269,7 @@ def main(args):
 
         elif opt == "egi":
 
-            optimizer = EGICBO(
+            optimizer0 = EGICBO(
                 models,
                 device=device,
                 lambda_=args.lamda,
@@ -286,7 +292,7 @@ def main(args):
 
         elif opt == "sga":
 
-            optimizer = SwarmGradAccel(
+            optimizer0 = SwarmGradAccel(
                 models,
                 device=device,
                 c1=args.c1,
@@ -314,9 +320,23 @@ def main(args):
             run["parameters/sub_swarms"] = args.sub
 
         elif opt == "pla":
-            optimizer = PlanarSwarm(
+            optimizer0 = PlanarSwarm(
                 models,
                 device=device,
+            )
+        elif opt == "dif":
+            if args.temperature:
+                fitness_mapping = Energy(temperature=args.temperature, l2_factor=args.l2)
+            else:
+                fitness_mapping = Identity(l2_factor=args.l2)
+
+            optimizer0 = DiffusionEvolution(
+                models,
+                device=device,
+                num_steps=args.num_steps,
+                noise=args.ddim_noise,
+                fitness_mapping=fitness_mapping,
+                latent_dim=args.latent if args.latent else None
             )
         else:
             raise NotImplementedError(f"Optim={opt}")
@@ -326,19 +346,25 @@ def main(args):
         run["parameters/sched_hyper"] = args.sched_hyper
 
         if args.sched == "none":
-            scheduler = NoScheduler(optimizer)
+            scheduler = NoScheduler(optimizer0)
         elif args.sched == "cos":
-            scheduler = CosineAnnealingLR(optimizer, args.sched_hyper) # T_max
+            scheduler = CosineAnnealingLR(optimizer0, args.sched_hyper) # T_max
         elif args.sched == "exp":
-            scheduler = ExponentialLR(optimizer, args.sched_hyper) # gamma
+            scheduler = ExponentialLR(optimizer0, args.sched_hyper) # gamma
         elif args.sched == "step":
-            scheduler = StepLR(optimizer, args.sched_hyper) # step_size
+            scheduler = StepLR(optimizer0, args.sched_hyper) # step_size
         elif args.sched == "plat":
-            scheduler = ReduceLROnPlateau(optimizer, patience=args.sched_hyper) # patience
+            scheduler = ReduceLROnPlateau(optimizer0, patience=args.sched_hyper) # patience
         else:
             raise NotImplementedError(f"Scheduler {args.sched} not implemented.")
 
+    if args.gradient:
+        model = model_class(sizes=[28*28,100,10]).to(device)
 
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=0.01,
+        )
 
     # Prep Data
     transform, train_dataset, test_dataset, train_loader, test_loader = preprocess()
@@ -346,10 +372,12 @@ def main(args):
     # Train the model
 
     # Dont compute gradients in case of Swarm optimizer
-    train_context = torch.no_grad if not args.gradient else contextlib.nullcontext
+    train_context = torch.no_grad if not (args.gradient or (args.switch >=0)) else contextlib.nullcontext
 
     if args.timeit > 0:
         time(optimizer, model, train_loader, args.timeit, device)
+
+    gradient = args.gradient
 
     with train_context():
         for epoch in range(args.epo):
@@ -357,10 +385,22 @@ def main(args):
             for batch_idx, (data, target) in enumerate(train_loader):
                 data, target = data.to(device), target.to(device)
 
-                if batch_idx > args.stop:
+                if batch_idx + epoch*len(train_loader) == args.switch:
+                    gradient = True
+                    model = deepcopy(model)
+                    model.train()
+                    for p in model.parameters():
+                        p.requires_grad_(True)
+
+                    optimizer = torch.optim.Adam(
+                        model.parameters(),
+                        lr=0.01,
+                    )
+
+                if batch_idx + epoch*len(train_loader) > args.stop:
                     break
 
-                if args.gradient:
+                if gradient:
                     optimizer.zero_grad()
 
                     output = model(data)
@@ -369,7 +409,7 @@ def main(args):
 
                     optimizer.step()
                 else:
-                    loss = optimizer.step(
+                    loss = optimizer0.step(
                         model,
                         data,
                         lambda out: F.nll_loss(out, target)
@@ -381,7 +421,7 @@ def main(args):
                         scheduler.step()
 
                     if args.neptune:
-                        for stat, val in optimizer.stats().items():
+                        for stat, val in optimizer0.stats().items():
                             run[f"train/{stat}"].append(val)
 
                 if args.neptune:

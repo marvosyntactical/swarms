@@ -302,6 +302,14 @@ def main(args):
                         lambda pred: criterion(pred, y)
                     )
 
+                    if isinstance(scheduler, ReduceLROnPlateau):
+                        scheduler.step(loss)
+                    else:
+                        scheduler.step()
+
+                if args.neptune:
+                    run["train/loss"].append(loss.item())
+
             # Print the loss for every epoch
             print(f"Epoch [{epoch+1}/{args.epo}], Loss: {loss.item():.4f}")
 

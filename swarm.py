@@ -14,6 +14,14 @@ import numpy as np
 
 from torch.func import vmap, functional_call, stack_module_state
 
+# for diffusion evolution
+from diffevo.fitnessmapping import *
+from diffevo.generator import *
+from diffevo.kde import *
+from diffevo.ddim import DDIMScheduler
+from diffevo.latent import RandomProjection
+
+
 # For Debugging
 f = lambda t: (t.isnan().sum()/t.nelement()).item()
 
@@ -107,9 +115,6 @@ class Swarm(optim.Optimizer):
 
         with ctx():
 
-            # required = loss_fn, model, x
-            # assert None not in required, required
-
             def get_loss(inp, X):
                 pprop = self.pprop
                 params = {p: X[pprop[p][-2]:pprop[p][-1]].view(pprop[p][0]) for p in pprop}
@@ -133,6 +138,53 @@ class Swarm(optim.Optimizer):
 
     def stats(self):
         return {}
+
+
+class DiffusionEvolution(Swarm):
+    def __init__(
+            self,
+            models: Iterable[nn.Module],
+            device: torch.device = "cpu",
+            num_steps: int = 100,
+            noise: float = 1.0,
+            fitness_mapping=None,
+            latent_dim: Optional[int] = None,
+        ):
+        # adapted from https://github.com/Zhangyanbo/diffusion-evolution/tree/096b1b267f957905d6b9aea1d3f2866eebbd6d65
+
+        super(DiffusionEvolution, self).__init__(models, device)
+
+        self.num_steps = num_steps
+        self.noise = noise
+
+        if fitness_mapping is None:
+            self.fitness_mapping = Identity()
+        else:
+            self.fitness_mapping = fitness_mapping
+
+        self.scheduler = DDIMScheduler(self.num_steps)
+
+        if latent_dim is not None:
+            self.random_map = RandomProjection(self.X.shape[-1], latent_dim, normalize=True)
+
+    def update_swarm(self):
+        _, alpha = next(self.scheduler)
+        f = self.fitness_mapping(self.current_losses)
+
+        if hasattr(self, "random_map"):
+            G = LatentBayesianGenerator(self.X, self.random_map(self.X).detach(), f, alpha)
+        else:
+            G = BayesianGenerator(self.X, f, alpha)
+
+        self.X = G(noise=self.noise)
+
+    def stats(self):
+        # TODO
+        return {}
+
+
+
+
 
 
 class PSO(Swarm):
@@ -603,8 +655,6 @@ class EGICBO(Swarm):
             "avg_v_norm": avgV,
             "g_norm": self.Gnorm
         }
-
-
 
 class PlanarSwarm(Swarm):
     def __init__(
