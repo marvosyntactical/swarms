@@ -13,6 +13,9 @@ from scipy.sparse.linalg import svds
 import numpy as np
 
 from torch.func import vmap, functional_call, stack_module_state
+from torch.nn.utils.parametrize import register_parametrization
+
+from copy import deepcopy
 
 # for diffusion evolution
 from diffevo.fitnessmapping import *
@@ -31,6 +34,7 @@ class Swarm(optim.Optimizer):
             models: Iterable[nn.Module],
             device: torch.device = "cpu",
             post_process: Callable = lambda s: None,
+            parallel: bool = True
         ):
         self.device = device
 
@@ -38,10 +42,18 @@ class Swarm(optim.Optimizer):
         self.N = num_particles
 
         defaults = dict(num_particles=num_particles)
-        super(Swarm, self).__init__(models[0].parameters(), defaults)
+
+        self.parallel = parallel
 
         self.X = self._initialize_particles(models, device=device)
-        self.pprop = self._get_pprops(models)
+
+        self.model = deepcopy(models[0])
+
+        if parallel:
+            self.pprop = self._get_pprops(models)
+
+        super(Swarm, self).__init__(self.model.parameters(), defaults)
+
         self.pp = post_process
 
         self.pbests_x = self.X
@@ -49,6 +61,9 @@ class Swarm(optim.Optimizer):
 
         # unnecessary:
         self.current_losses = self.pbests_y.clone()
+
+        # TODO NOTE FIXME: For PINN
+        # self.X.requires_grad_(True)
 
     def set_lr(self, new_lr):
         if not hasattr(self, "lr"):
@@ -66,14 +81,21 @@ class Swarm(optim.Optimizer):
 
 
     def _initialize_particles(self, models: Iterable[nn.Module], device: torch.device="cpu"):
-        # adapted from https://github.com/PdIPS/CBXpy/blob/main/cbx/utils/torch_utils.py
-        pnames = [p[0] for p in models[0].named_parameters()]
-        params, buffers = stack_module_state(models)
+        if self.parallel:
+            # adapted from https://github.com/PdIPS/CBXpy/blob/main/cbx/utils/torch_utils.py
+            pnames = [p[0] for p in models[0].named_parameters()]
+            params, buffers = stack_module_state(models)
 
-        N = list(params.values())[-1].shape[0]
-        X = torch.concatenate([params[pname].view(N,-1).detach() for pname in pnames], dim=-1)
-        X = X.to(device)
-        return X
+            N = list(params.values())[-1].shape[0]
+            X = torch.concatenate([params[pname].view(N,-1).detach() for pname in pnames], dim=-1)
+            X = X.to(device)
+            return X
+        else:
+            X = [[] for _ in range(self.N)]
+            for i, m in enumerate(models):
+                X[i] = nn.utils.parameters_to_vector(m.parameters())
+            X = torch.stack(X).to(device)
+            return X
 
     def _get_pprops(self, models: Iterable[nn.Module]):
         # taken from https://github.com/PdIPS/CBXpy/blob/main/cbx/utils/torch_utils.py
@@ -115,16 +137,35 @@ class Swarm(optim.Optimizer):
 
         with ctx():
 
-            def get_loss(inp, X):
-                pprop = self.pprop
-                params = {p: X[pprop[p][-2]:pprop[p][-1]].view(pprop[p][0]) for p in pprop}
-                pred = functional_call(model, (params, {}), inp)
-                # loss = loss_func(pred, y) # OLD
-                loss = loss_fn(pred) # NEW (RL compatible)
-                return loss
+            if self.parallel:
+                def get_loss(inp, X):
+                    # print(f"inp: {inp.requires_grad}")
+                    # print(f"X: {X.requires_grad}")
+                    pprop = self.pprop
+                    params = {p: X[pprop[p][-2]:pprop[p][-1]].view(pprop[p][0]) for p in pprop}
+                    # Not allowed, requires_grad_ must be done outside vmap ...!
+                    # for n, param in params.items():
+                    #     param.requires_grad_(True)
+                    pred = functional_call(model, (params, {}), inp)
+                    # print(f"pred: {pred.requires_grad}")
+                    # loss = loss_func(pred, y) # OLD
+                    loss = loss_fn(pred) # NEW (RL compatible)
+                    return loss
 
-            get_losses = vmap(get_loss, (None, 0))
-            self.current_losses = get_losses(x, self.X)
+                # self.X.requires_grad_(True)
+                get_losses = vmap(get_loss, (None, 0))
+                self.current_losses = get_losses(x, self.X)
+
+            else:
+                for i in range(self.N):
+                    # TODO: Replace self.model weights with weights given by param i
+                    # print(f"Substituting vector {i}")
+                    nn.utils.vector_to_parameters(self.X[i], self.model.parameters())
+                    # print(f"Forwarding model with vector {i}")
+                    pred = self.model(x)
+                    # print(f"Forwarding loss with vector {i}")
+                    loss = loss_fn(pred)
+                    self.current_losses[i] = loss
 
             self.update_bests()
             self.update_swarm()
@@ -149,10 +190,11 @@ class DiffusionEvolution(Swarm):
             noise: float = 1.0,
             fitness_mapping=None,
             latent_dim: Optional[int] = None,
+            parallel: bool = True,
         ):
         # adapted from https://github.com/Zhangyanbo/diffusion-evolution/tree/096b1b267f957905d6b9aea1d3f2866eebbd6d65
 
-        super(DiffusionEvolution, self).__init__(models, device)
+        super(DiffusionEvolution, self).__init__(models, device, parallel=parallel)
 
         self.num_steps = num_steps
         self.noise = noise
@@ -172,17 +214,15 @@ class DiffusionEvolution(Swarm):
         f = self.fitness_mapping(self.current_losses)
 
         if hasattr(self, "random_map"):
-            G = LatentBayesianGenerator(self.X, self.random_map(self.X).detach(), f, alpha)
+            G = LatentBayesianGenerator(self.X, self.random_map(self.X).detach(), f, alpha, density="kde")
         else:
-            G = BayesianGenerator(self.X, f, alpha)
+            G = BayesianGenerator(self.X, f, alpha, density="kde")
 
         self.X = G(noise=self.noise)
 
     def stats(self):
         # TODO
         return {}
-
-
 
 
 
@@ -196,8 +236,9 @@ class PSO(Swarm):
             inertia = 0.1,
             device: torch.device = "cpu",
             do_momentum: bool = False,
+            parallel: bool = True,
         ):
-        super(PSO, self).__init__(models, device)
+        super(PSO, self).__init__(models, device, parallel=parallel)
 
         self.V = torch.zeros_like(self.X)
         self.A = torch.zeros_like(self.X)
@@ -272,8 +313,9 @@ class SwarmGradAccel(Swarm):
             post_process: Callable = lambda s: None,
             normalize: int = 0,
             sub_swarms: int = 1,
+            parallel: bool = True,
         ):
-        super(SwarmGradAccel, self).__init__(models, device, post_process=post_process)
+        super(SwarmGradAccel, self).__init__(models, device, post_process=post_process, parallel=parallel)
 
         self.V = torch.zeros_like(self.X)
         self.A = torch.zeros_like(self.X)
@@ -397,8 +439,9 @@ class CBO(Swarm):
             device: torch.device = "cpu",
             post_process: Callable = lambda s: None,
             do_momentum: bool = False,
+            parallel: bool = True
         ):
-        super(CBO, self).__init__(models, device, post_process=post_process)
+        super(CBO, self).__init__(models, device, post_process=post_process, parallel=parallel)
 
         self.lambda_ = lambda_ # drift
         self.sigma = sigma # diff
@@ -481,8 +524,9 @@ class EGICBO(Swarm):
             post_process: Callable = lambda s: None,
             device: torch.device = "cpu",
             do_momentum: bool = False,
+            parallel: bool = True
         ):
-        super(EGICBO, self).__init__(models, device, post_process=post_process)
+        super(EGICBO, self).__init__(models, device, post_process=post_process, parallel=parallel)
 
         self.lambda_ = lambda_ # drift
         self.sigma = sigma # diff

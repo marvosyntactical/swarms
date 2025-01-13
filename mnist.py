@@ -161,7 +161,7 @@ def parse_args():
     # DIFF EVO
     parser.add_argument("--num-steps", type=int, default=1000, help="Number of steps (DiffEvo)")
     parser.add_argument("--temperature", type=float, default=0.0, help="If != 0, use Energy Mapping with this temp")
-    parser.add_argument("--ddim-noise", type=float, default=1.0, help="Noise of generator sample")
+    parser.add_argument("--ddim-noise", type=float, default=1.0, help="Noise of generator sample (<=1)")
     parser.add_argument("--l2", type=float, default=0.0, help="l2 penalty (DiffEvo)")
     parser.add_argument("--latent", type=int, default=0, help="Latent dim of Latent DiffEvo (ignored if 0)")
 
@@ -178,6 +178,7 @@ def parse_args():
         ]
     )
     parser.add_argument("--sched-hyper", type=float, default=.1, help="Scheduler Hyperparameter")
+    parser.add_argument("--autograd", action="store_true", help="Do NOT parallelize models using vmap? enables autograd")
 
     return parser.parse_args()
 
@@ -223,10 +224,13 @@ def main(args):
     device = torch.device("cuda" if args.gpu and torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    sizes = [28*28,100,10]
+    # sizes = [28*28,10]
+
     if not args.gradient:
-        models = [model_class(sizes=[28*28,100,10]).to(device) for _ in range(args.N)]
+
+        models = [model_class(sizes=sizes).to(device) for _ in range(args.N)]
         # models = [model_class() for _ in range(args.N)]
-        model = models[0]
 
         if args.resample >= 0:
             rs = rsmp.resampling([rsmp.loss_update_resampling(M=1, wait_thresh=args.resample,
@@ -246,6 +250,7 @@ def main(args):
                 do_momentum=args.do_momentum,
                 temp=args.temp,
                 device=device,
+                parallel=not args.autograd
             )
             run["parameters/lambda"] = args.lamda
             run["parameters/sigma"] = args.sigma
@@ -279,7 +284,8 @@ def main(args):
                 dt=args.dt,
                 slack=args.slack,
                 post_process=lambda cbo: rs(cbo),
-                extrapolate=args.hess
+                extrapolate=args.hess,
+                parallel=not args.autograd
             )
             run["parameters/lambda"] = args.lamda
             run["parameters/sigma"] = args.sigma
@@ -305,7 +311,8 @@ def main(args):
                 do_momentum=args.do_momentum,
                 post_process=lambda cbo: rs(cbo),
                 normalize=args.normalize,
-                sub_swarms=args.sub
+                sub_swarms=args.sub,
+                parallel=not args.autograd
             )
             run["parameters/c1"] = args.c1
             run["parameters/c2"] = args.c2
@@ -336,10 +343,13 @@ def main(args):
                 num_steps=args.num_steps,
                 noise=args.ddim_noise,
                 fitness_mapping=fitness_mapping,
-                latent_dim=args.latent if args.latent else None
+                latent_dim=args.latent if args.latent else None,
+                parallel=not args.autograd
             )
         else:
             raise NotImplementedError(f"Optim={opt}")
+
+        model = optimizer0.model
 
         # SCHEDULER
         run["parameters/scheduler"] = args.sched
@@ -359,7 +369,7 @@ def main(args):
             raise NotImplementedError(f"Scheduler {args.sched} not implemented.")
 
     if args.gradient:
-        model = model_class(sizes=[28*28,100,10]).to(device)
+        model = model_class(sizes=sizes).to(device)
 
         optimizer = torch.optim.Adam(
             model.parameters(),

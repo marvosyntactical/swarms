@@ -12,9 +12,11 @@ from mpl_toolkits.mplot3d import Axes3D
 from swarm import SwarmGradAccel
 import resampling as rsmp
 from scheduler import *
+from torch.utils.checkpoint import checkpoint
 
 GRADIENT = 0
-
+DEBUG = 0
+AUTOGRAD = 1
 
 # Set data type
 DTYPE = torch.float32
@@ -108,7 +110,11 @@ def init_model(num_hidden_layers=8, num_neurons_per_layer=20):
 
     def make_dbg(s):
         def dbg(layer, x):
-            assert x[0].requires_grad, s
+            if DEBUG:
+                if isinstance(layer, torch.nn.Linear):
+                    assert layer.weight.requires_grad, s
+                    assert layer.bias.requires_grad, s
+                assert x[0].requires_grad, s
         return dbg
 
     # input_layer = torch.nn.Linear(2, num_neurons_per_layer)
@@ -151,6 +157,8 @@ def get_r(model, X_r):
     # Determine residual
     u = model(stacked)
 
+    assert u.requires_grad, u.requires_grad
+
     # Compute gradients
     u_t = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), create_graph=True)[0]
     u_x = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), create_graph=True)[0]
@@ -184,13 +192,14 @@ if GRADIENT:
         milestones=[1000, 3000],
         gamma=0.1
     )
+    for n, p in model.named_parameters():
+        print(f"{n}: {p.requires_grad}")
 else:
-    N = 50
+    N = 10
     K = 5
     models = [init_model() for _ in range(N)]
-    model = models[0]
     for m in models:
-        for p in model.parameters():
+        for n, p in m.named_parameters():
             p.requires_grad_(True)
 
     rs = rsmp.resampling([rsmp.loss_update_resampling(M=1, wait_thresh=40)], 1)
@@ -204,8 +213,11 @@ else:
         K=K,
         do_momentum=True,
         normalize=2,
-        post_process=lambda o: rs(o),
+        # post_process=lambda o: rs(o),
+        parallel=not AUTOGRAD
     )
+    model = optimizer.model
+
     scheduler = StepLR(optimizer, 100, gamma=0.1) # step_size
 
 
@@ -247,29 +259,47 @@ def train_step():
             u_pred_0 = model_preds[N_r:N_r+N_0]
             u_pred_b = model_preds[N_r+N_0:]
 
-            print("u requires grad:", u.requires_grad)
-            print("u_pred_0 requires grad:", u_pred_0.requires_grad)
-            print("u_pred_b requires grad:", u_pred_b.requires_grad)
+            # print("t requires grad:", t.requires_grad)
+            # print("x requires grad:", x.requires_grad)
+            # print("stackered requires grad:", stackered.requires_grad)
+
+            # print("u requires grad:", u.requires_grad)
+            # print("u_pred_0 requires grad:", u_pred_0.requires_grad)
+            # print("u_pred_b requires grad:", u_pred_b.requires_grad)
+
+            def compute_u_t(u, t):
+                return torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+
+            def compute_u_x(u, x):
+                return torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+
+            def compute_u_xx(u_x, x):
+                return torch.autograd.grad(u_x, x, grad_outputs=torch.ones_like(u_x))[0]
 
             # Compute gradients
-            u_t = torch.autograd.grad(
-                u, t, grad_outputs=torch.ones_like(u), create_graph=True
-            )[0]
-            u_x = torch.autograd.grad(
-                u, x, grad_outputs=torch.ones_like(u), create_graph=True
-            )[0]
-            u_xx = torch.autograd.grad(
-                u_x, x, grad_outputs=torch.ones_like(u_x), create_graph=True
-            )[0]
+            # print(f"Before autograd")
+            u_t = compute_u_t(u, t)
+            # print(f"After autograd 0")
+            u_x = compute_u_x(u, x)
+            # print(f"After autograd 1")
+            u_xx = compute_u_xx(u_x, x) # do not need graph further, so dont need to ckpt
+            # print(f"After autograd 2")
 
             residual = fun_r(t, x, u, u_t, u_x, u_xx)
+
+            u_t.detach()
+            u_x.detach()
+            u_xx.detach()
+
+            del u, u_t, u_x, u_xx
 
             # Initialize loss
             loss = torch.mean(torch.square(residual))
 
             # Add phi^0 and phi^b to the loss
             loss += torch.mean(torch.square(u_data[0] - u_pred_0))
-            loss += torch.mean(torch.square(u_data[i] - u_pred_b))
+            loss += torch.mean(torch.square(u_data[1] - u_pred_b))
+
 
             return loss
 
@@ -282,7 +312,11 @@ def train_step():
 
 
         scheduler.step()
+        optimizer.zero_grad()
 
+        with torch.no_grad():
+            for param in optimizer.model.parameters():
+                param.detach_()
 
     return loss
 
@@ -293,17 +327,17 @@ hist = []
 # Start timer
 t0 = time()
 
-for i in range(epochs+1):
+for i in range(epochs):
 
     loss = train_step()
 
     # Append current loss to hist
     hist.append(loss.item())
 
+    # if i%50 == 0:
+    print('It {:05d}: loss = {:10.8e}'.format(i, loss.item()))
 
-    # Output current loss after 50 iterates
-    if i%50 == 0:
-        print('It {:05d}: loss = {:10.8e}'.format(i, loss.item()))
+    del loss
 
 # Print computation time
 print('\nComputation time: {} seconds'.format(time()-t0))

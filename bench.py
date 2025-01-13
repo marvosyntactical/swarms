@@ -121,9 +121,8 @@ def parse_args():
     parser.add_argument("--hess", action="store_true", help="Extrapolate using Hessian? (EGICBO)")
 
     # DIFF EVO
-    parser.add_argument("--num-steps", type=int, default=1000, help="Number of steps (DiffEvo)")
     parser.add_argument("--temperature", type=float, default=0.0, help="If != 0, use Energy Mapping with this temp")
-    parser.add_argument("--ddim-noise", type=float, default=1.0, help="Noise of generator sample")
+    parser.add_argument("--ddim-noise", type=float, default=1.0, help="Noise of generator sample (<=1)")
     parser.add_argument("--l2", type=float, default=0.0, help="l2 penalty (DiffEvo)")
     parser.add_argument("--latent", type=int, default=0, help="Latent dim of Latent DiffEvo (ignored if 0)")
 
@@ -138,6 +137,7 @@ def parse_args():
         ]
     )
     parser.add_argument("--sched-hyper", type=float, default=.1, help="Scheduler Hyperparameter")
+    parser.add_argument("--autograd", action="store_true", help="Do NOT parallelize models using vmap? enables autograd")
 
 
     return parser.parse_args()
@@ -181,7 +181,6 @@ def main(args):
         offsets = [torch.Tensor([args.means[i]]*args.dim) for i in range(args.sub)]
         subswarm = lambda prtcl: int(prtcl//(args.N/args.sub))
         models = [ObjectiveFunction(objective, args.dim, offsets[subswarm(prtcl)], args.std) for prtcl in range(args.N)]
-        model = models[0]
 
         if args.resample >= 0:
             rs = rsmp.resampling([rsmp.loss_update_resampling(M=1, wait_thresh=args.resample)], 1)
@@ -198,7 +197,8 @@ def main(args):
                 noise_type=args.noise,
                 post_process=lambda cbo: rs(cbo),
                 do_momentum=args.do_momentum,
-                temp=args.temp
+                temp=args.temp,
+                parallel=not args.autograd
             )
             run["parameters/lambda"] = args.lamda
             run["parameters/sigma"] = args.sigma
@@ -214,6 +214,7 @@ def main(args):
                 c1=args.c1,
                 c2=args.c2,
                 inertia=args.inertia,
+                parallel=not args.autograd
             )
             run["parameters/c1"] = args.c1
             run["parameters/c2"] = args.c2
@@ -230,7 +231,8 @@ def main(args):
                 dt=args.dt,
                 slack=args.slack,
                 post_process=lambda cbo: rs(cbo),
-                extrapolate=args.hess
+                extrapolate=args.hess,
+                parallel=not args.autograd
             )
             run["parameters/lambda"] = args.lamda
             run["parameters/sigma"] = args.sigma
@@ -255,7 +257,8 @@ def main(args):
                 do_momentum=args.do_momentum,
                 post_process=lambda cbo: rs(cbo),
                 normalize=args.normalize,
-                sub_swarms=args.sub
+                sub_swarms=args.sub,
+                parallel=not args.autograd
             )
             run["parameters/c1"] = args.c1
             run["parameters/c2"] = args.c2
@@ -272,6 +275,7 @@ def main(args):
         elif opt == "pla":
             optimizer = PlanarSwarm(
                 models,
+                parallel=not args.autograd
             )
         elif opt == "dif":
             if args.temperature:
@@ -305,6 +309,8 @@ def main(args):
             scheduler = ReduceLROnPlateau(optimizer, patience=args.sched_hyper) # patience
         else:
             raise NotImplementedError(f"Scheduler {args.sched} not implemented.")
+
+        model = optimizer.model
 
     # Dont compute gradients in case of Swarm optimizer
     train_context = torch.no_grad if not args.gradient else contextlib.nullcontext
