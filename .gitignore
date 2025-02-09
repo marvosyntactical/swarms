@@ -5,3 +5,5 @@ __pycache__/*
 .THOUGHTS.md
 s/*
 gpt/out-shakespeakre-char/*
+gpt/__pycache__/*
+
