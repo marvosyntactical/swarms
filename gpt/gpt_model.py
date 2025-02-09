@@ -16,11 +16,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 from sinkhorn import SinkhornDistance
-from swarm import Swarm, PSO, SwarmGrad, SwarmGradAccel, CBO, EGICBO, PlanarSwarm
 
 MAX_ITER_SINK = 1
-GRADIENT = 0 # use zeroth order optim (swarm) or 1st order optim (adam) ?
-
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -56,6 +53,8 @@ class CausalSelfAttention(nn.Module):
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
+        else:
+            print("====== Using Flash Attention! ======")
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
@@ -77,17 +76,14 @@ class CausalSelfAttention(nn.Module):
             att_shape = att.shape
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
-            att = att.view(-1, att_shape[2], att_shape[3])
+            if MAX_ITER_SINK > 1:
+                att = att.view(-1, att_shape[2], att_shape[3])
+                sink = SinkhornDistance(1, max_iter=MAX_ITER_SINK)
+                sinked_att = sink(att)[0]
+                sinked_att = sinked_att * sinked_att.shape[-1]
+                att = sinked_att.view(att_shape)
 
-
-            sink = SinkhornDistance(1, max_iter=MAX_ITER_SINK)
-            # print(f"att.shape={att.shape}")
-            sinked_att = sink(att)[0]
-            sinked_att = sinked_att * sinked_att.shape[-1]
-            # print(f"sinked_att.shape={sinked_att.shape}")
-            # print(f"v.shape={v.shape}")
-            sinked_att = sinked_att.view(att_shape)
-            y = sinked_att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
@@ -134,6 +130,8 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
+STD = 0.2
+
 class GPT(nn.Module):
 
     def __init__(self, config):
@@ -161,7 +159,7 @@ class GPT(nn.Module):
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
-                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+                torch.nn.init.normal_(p, mean=0.0, std=STD/math.sqrt(2 * config.n_layer))
 
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
@@ -180,11 +178,11 @@ class GPT(nn.Module):
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=STD)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=STD)
 
     def forward(self, idx, targets=None):
         device = idx.device
@@ -206,7 +204,8 @@ class GPT(nn.Module):
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            # logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            logits = self.lm_head(x) # note: using list [-1] to preserve the time dim
             loss = None
 
         return logits, loss
@@ -280,47 +279,29 @@ class GPT(nn.Module):
         return model
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
-        if GRADIENT:
-            # start with all of the candidate parameters
-            param_dict = {pn: p for pn, p in self.named_parameters()}
-            # filter out those that do not require grad
-            param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-            # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-            # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-            decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-            nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-            optim_groups = [
-                {'params': decay_params, 'weight_decay': weight_decay},
-                {'params': nodecay_params, 'weight_decay': 0.0}
-            ]
-            num_decay_params = sum(p.numel() for p in decay_params)
-            num_nodecay_params = sum(p.numel() for p in nodecay_params)
-            print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-            print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-            # Create AdamW optimizer and use the fused version if it is available
-            fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-            use_fused = fused_available and device_type == 'cuda'
-            extra_args = dict(fused=True) if use_fused else dict()
+        # start with all of the candidate parameters
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        # filter out those that do not require grad
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        # Create AdamW optimizer and use the fused version if it is available
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == 'cuda'
+        extra_args = dict(fused=True) if use_fused else dict()
 
-            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-            print(f"using fused AdamW: {use_fused}")
-        else:
-            # TODO add these ase config params
-
-            # Optim = PSO
-            # Optim = SwarmGrad
-            Optim = SwarmGradAccel
-            # Optim = CBO
-            # Optim = EGICBO
-            # Optim = PlanarSwarm
-
-            N = 10
-            optimizer = Optim(
-                [p for pn, p in self.named_parameters()],
-                num_particles=N
-            )
-            print(f"============ Using 0th Order Optimizer ===========")
-
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+        print(f"using fused AdamW: {use_fused}")
 
         return optimizer
 

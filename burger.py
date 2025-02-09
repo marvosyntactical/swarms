@@ -9,7 +9,7 @@ from time import time
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
-from swarm import SwarmGradAccel
+from swarm import SwarmGradAccel, CBO
 import resampling as rsmp
 from scheduler import *
 from torch.utils.checkpoint import checkpoint
@@ -17,12 +17,18 @@ from torch.utils.checkpoint import checkpoint
 GRADIENT = 0
 DEBUG = 0
 AUTOGRAD = 1
+GPU = 1
+OPTIM = "sga"
+
+device = torch.device("cuda" if GPU and torch.cuda.is_available() else "cpu")
+
+print("Using device", device)
 
 # Set data type
 DTYPE = torch.float32
 
 # Set constants
-pi = torch.tensor(np.pi, dtype=DTYPE)
+pi = torch.tensor(np.pi, dtype=DTYPE).to(device)
 viscosity = .01 / pi
 
 # Define initial condition
@@ -50,32 +56,32 @@ xmin = -1.
 xmax = 1.
 
 # Lower bounds
-lb = torch.tensor([tmin, xmin], dtype=DTYPE)
+lb = torch.tensor([tmin, xmin], dtype=DTYPE).to(device)
 # Upper bounds
-ub = torch.tensor([tmax, xmax], dtype=DTYPE)
+ub = torch.tensor([tmax, xmax], dtype=DTYPE).to(device)
 
 # Set random seed for reproducible results
 torch.manual_seed(0)
 
 # Draw uniform sample points for initial boundary data
-t_0 = torch.ones((N_0, 1), dtype=DTYPE) * lb[0]
-x_0 = torch.rand((N_0, 1), dtype=DTYPE) * (ub[1] - lb[1]) + lb[1]
-X_0 = torch.cat([t_0, x_0], dim=1)
+t_0 = torch.ones((N_0, 1), dtype=DTYPE).to(device) * lb[0]
+x_0 = torch.rand((N_0, 1), dtype=DTYPE).to(device) * (ub[1] - lb[1]) + lb[1]
+X_0 = torch.cat([t_0, x_0], dim=1).to(device)
 
 # Evaluate initial condition at x_0
-u_0 = fun_u_0(x_0)
+u_0 = fun_u_0(x_0).to(device)
 
 # Boundary data
-t_b = torch.rand((N_b, 1), dtype=DTYPE) * (ub[0] - lb[0]) + lb[0]
-x_b = lb[1] + (ub[1] - lb[1]) * torch.bernoulli(torch.full((N_b, 1), 0.5, dtype=DTYPE))
+t_b = torch.rand((N_b, 1), dtype=DTYPE).to(device) * (ub[0] - lb[0]) + lb[0]
+x_b = lb[1] + (ub[1] - lb[1]) * torch.bernoulli(torch.full((N_b, 1), 0.5, dtype=DTYPE)).to(device)
 X_b = torch.cat([t_b, x_b], dim=1)
 
 # Evaluate boundary condition at (t_b, x_b)
-u_b = fun_u_b(t_b, x_b)
+u_b = fun_u_b(t_b, x_b).to(device)
 
 # Draw uniformly sampled collocation points
-t_r = torch.rand((N_r, 1), dtype=DTYPE) * (ub[0] - lb[0]) + lb[0]
-x_r = torch.rand((N_r, 1), dtype=DTYPE) * (ub[1] - lb[1]) + lb[1]
+t_r = torch.rand((N_r, 1), dtype=DTYPE).to(device) * (ub[0] - lb[0]) + lb[0]
+x_r = torch.rand((N_r, 1), dtype=DTYPE).to(device) * (ub[1] - lb[1]) + lb[1]
 X_r = torch.cat([t_r, x_r], dim=1)
 
 # Collect boundary and initial data in lists
@@ -84,9 +90,9 @@ u_data = [u_0, u_b]
 
 def show_collocations():
     fig = plt.figure(figsize=(9, 6))
-    plt.scatter(t_0.numpy(), x_0.numpy(), c=u_0.numpy(), marker='X', vmin=-1, vmax=1)
-    plt.scatter(t_b.numpy(), x_b.numpy(), c=u_b.numpy(), marker='X', vmin=-1, vmax=1)
-    plt.scatter(t_r.numpy(), x_r.numpy(), c='r', marker='.', alpha=0.1)
+    plt.scatter(t_0.cpu().numpy(), x_0.cpu().numpy(), c=u_0.cpu().numpy(), marker='X', vmin=-1, vmax=1)
+    plt.scatter(t_b.cpu().numpy(), x_b.cpu().numpy(), c=u_b.cpu().numpy(), marker='X', vmin=-1, vmax=1)
+    plt.scatter(t_r.cpu().numpy(), x_r.cpu().numpy(), c='r', marker='.', alpha=0.1)
     plt.xlabel('$t$')
     plt.ylabel('$x$')
 
@@ -95,10 +101,10 @@ def show_collocations():
     # plt.show()
 
 class ScalingLayer(torch.nn.Module):
-    def __init__(self, lb, ub):
+    def __init__(self, lb, ub, device):
         super(ScalingLayer, self).__init__()
-        self.lb = lb.view(1, -1)
-        self.ub = ub.view(1, -1)
+        self.lb = lb.view(1, -1).to(device)
+        self.ub = ub.view(1, -1).to(device)
 
     def forward(self, x):
         return 2.0 * (x - self.lb) / (self.ub - self.lb) - 1.0
@@ -111,30 +117,35 @@ def init_model(num_hidden_layers=8, num_neurons_per_layer=20):
     def make_dbg(s):
         def dbg(layer, x):
             if DEBUG:
+                print(s)
                 if isinstance(layer, torch.nn.Linear):
                     assert layer.weight.requires_grad, s
                     assert layer.bias.requires_grad, s
+                    print("w", layer.weight.device)
+                    print("b", layer.bias.device)
                 assert x[0].requires_grad, s
+                print("x", x[0].device)
         return dbg
 
     # input_layer = torch.nn.Linear(2, num_neurons_per_layer)
     # layers.append(input_layer)
 
     # Introduce a scaling layer to map input to [lb, ub]
-    scaling_layer = ScalingLayer(lb, ub)
+    scaling_layer = ScalingLayer(lb, ub, device)
     scaling_layer.register_forward_pre_hook(make_dbg("scaling"))
     layers.append(scaling_layer)
 
     input_layer = torch.nn.Linear(2, num_neurons_per_layer)
+    # input_layer.weight.data = input_layer.weight.data.to(device)
     input_layer.register_forward_pre_hook(make_dbg("input"))
     layers.append(input_layer)
-
 
     # Append hidden layers
     for i in range(num_hidden_layers):
         hidden_layer = torch.nn.Linear(
             num_neurons_per_layer, num_neurons_per_layer
         )
+        hidden_layer = hidden_layer
         hidden_layer.register_forward_pre_hook(make_dbg(i))
         layers.append(hidden_layer)
         layers.append(torch.nn.Tanh())
@@ -185,7 +196,7 @@ def compute_loss(model, X_r, X_data, u_data):
 
 if GRADIENT:
     # Initialize model aka u_\theta
-    model = init_model()
+    model = init_model().to(device)
 
     lr_schedule = torch.optim.lr_scheduler.MultiStepLR(
         optimizer=torch.optim.Adam(model.parameters(), lr=1e-2),
@@ -195,32 +206,46 @@ if GRADIENT:
     for n, p in model.named_parameters():
         print(f"{n}: {p.requires_grad}")
 else:
-    N = 10
+    N = 50
     K = 5
-    models = [init_model() for _ in range(N)]
+    models = [init_model().to(device) for _ in range(N)]
+
     for m in models:
         for n, p in m.named_parameters():
             p.requires_grad_(True)
+            # print(p.device)
 
-    rs = rsmp.resampling([rsmp.loss_update_resampling(M=1, wait_thresh=40)], 1)
+    if OPTIM == "sga":
+        optimizer = SwarmGradAccel(
+            models,
+            c1=1,
+            c2=0,
+            lr=0.1,
+            beta1=0.7,
+            beta2=0.9,
+            K=K,
+            do_momentum=True,
+            normalize=2,
+            # post_process=lambda o: rs(o),
+            parallel=not AUTOGRAD,
+            device=device
+        )
+    elif OPTIM == "cbo":
 
-    optimizer = SwarmGradAccel(
-        models,
-        c1=1,
-        c2=0,
-        beta1=0.7,
-        beta2=0.9,
-        K=K,
-        do_momentum=True,
-        normalize=2,
-        # post_process=lambda o: rs(o),
-        parallel=not AUTOGRAD
-    )
+        rs = rsmp.resampling([rsmp.loss_update_resampling(M=1, wait_thresh=40, device=device)], 1)
+
+        optimizer = CBO(
+            models,
+            dt=.1,
+            post_process=lambda cbo: rs(cbo),
+            do_momentum=True,
+            parallel=not AUTOGRAD,
+            device=device,
+        )
+
     model = optimizer.model
 
     scheduler = StepLR(optimizer, 100, gamma=0.1) # step_size
-
-
 
 
 def train_step():
@@ -300,7 +325,6 @@ def train_step():
             loss += torch.mean(torch.square(u_data[0] - u_pred_0))
             loss += torch.mean(torch.square(u_data[1] - u_pred_b))
 
-
             return loss
 
         with torch.enable_grad():
@@ -310,9 +334,8 @@ def train_step():
                 get_loss_
             )
 
-
         scheduler.step()
-        optimizer.zero_grad()
+        optimizer.zero_grad() # when should I call zero grad?
 
         with torch.no_grad():
             for param in optimizer.model.parameters():
@@ -358,7 +381,7 @@ with torch.no_grad():
     upred = model(Xgrid_tensor)
 
 # Reshape upred
-U = upred.numpy().reshape(n_eval+1, n_eval+1)
+U = upred.cpu().numpy().reshape(n_eval+1, n_eval+1)
 
 # Surface plot of solution u(t,x)
 fig = plt.figure(figsize=(9, 6))

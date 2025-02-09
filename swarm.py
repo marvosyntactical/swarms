@@ -132,8 +132,7 @@ class Swarm(optim.Optimizer):
             loss_fn: Callable, # must have signature model_output -> loss
         ):
 
-        # NOTE FIXME TODO THIS IS FOR PINN DEBUGGING; REMOVE THIS
-        ctx = torch.no_grad if 0 else contextlib.nullcontext
+        ctx = torch.no_grad if not self.parallel else contextlib.nullcontext
 
         with ctx():
 
@@ -207,7 +206,8 @@ class DiffusionEvolution(Swarm):
         self.scheduler = DDIMScheduler(self.num_steps)
 
         if latent_dim is not None:
-            self.random_map = RandomProjection(self.X.shape[-1], latent_dim, normalize=True)
+            self.random_map = RandomProjection(self.X.shape[-1], latent_dim,
+                    normalize=True).to(device)
 
     def update_swarm(self):
         _, alpha = next(self.scheduler)
@@ -233,12 +233,15 @@ class PSO(Swarm):
             models: Iterable[nn.Module],
             c1 = 1.5, # personal # TODO is this correct?
             c2 = 0.5, # global
+            beta1 = 0.9,
+            beta2 = 0.99,
             inertia = 0.1,
             device: torch.device = "cpu",
+            post_process: Callable = lambda s: None,
             do_momentum: bool = False,
             parallel: bool = True,
         ):
-        super(PSO, self).__init__(models, device, parallel=parallel)
+        super(PSO, self).__init__(models, device, post_process=post_process, parallel=parallel)
 
         self.V = torch.zeros_like(self.X)
         self.A = torch.zeros_like(self.X)
@@ -248,12 +251,16 @@ class PSO(Swarm):
         self.inertia = inertia
 
         # NOTE dummy, add as arguments
-        self.beta1 = 0.7
-        self.beta2 = 0.9
+        self.beta1 = beta1
+        self.beta2 = beta2
         self.t = 1
         self.lr = 1.0
 
         self.do_momentum = do_momentum
+
+        # NOTE FIXME: hardcoded for access by resampling
+        self.sigma = 0.1
+        self.dt = 0.1
 
     def get_best(self):
         return torch.argmin(self.pbests_y)
@@ -384,7 +391,6 @@ class SwarmGradAccel(Swarm):
             # leaky relu decreases difference if particle is already better than reference
             # so we dont move too much in the opposite direction
             F.leaky_relu(fdiffk, negative_slope=self.leak, inplace=True)
-            # fdiffk = F.gelu(fdiffk) # NOTE TODO TEST REMOVE ME FIXME
             fdiffk.unsqueeze_(-1)
 
             Vref += fdiffk * Hk

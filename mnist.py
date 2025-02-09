@@ -46,9 +46,11 @@ class SmallConvNet(nn.Module):
 
 class Perceptron(nn.Module):
     # taken from https://github.com/PdIPS/CBXpy/blob/main/docs/examples/nns/models.py
-    def __init__(self, mean = 0.0, std = 1.0,
-                 act_fun=nn.ReLU,
-                 sizes = None):
+    def __init__(
+            self, mean = 0.0, std = 1.0,
+            act_fun=nn.ReLU,
+            sizes = None
+        ):
         super(Perceptron, self).__init__()
 
         self.mean = mean
@@ -112,7 +114,7 @@ def parse_args():
             "pso",
             "sga",
             "pla",
-            "dif"
+            "evo"
         ],
         help="The 0th order Optim to use."
     )
@@ -121,16 +123,19 @@ def parse_args():
     parser.add_argument("--epo", type=int, default=10, help="Number of Epochs")
     parser.add_argument("--switch", type=int, default=-1, help="Switch from 0 Order optimizer to Adam after this many batches")
     parser.add_argument("--stop", type=int, default=1e15, help="End Epochs after this number of batches")
+    parser.add_argument("--hidden", type=int, default=100, help="Width of hidden layer of MLP with \
+    architecture [784,args.hidden,10]")
 
     parser.add_argument("--neptune", action="store_true", help="Log to Neptune?")
     parser.add_argument("--gpu", action="store_true", help="Try to use CUDA?")
+    parser.add_argument("--resample", type=int, default=40, help="Resample if swarm has not improved for this many updates. Negative for no resampling.")
 
     # ==== Optimizer Specific Hyperparameters ====
 
+    # PSO
     parser.add_argument("--c1", type=float, default=1.0, help="c1 Hyperparameter of optimizer")
     parser.add_argument("--c2", type=float, default=1.0, help="c2 Hyperparameter of optimizer")
     parser.add_argument("--inertia", type=float, default=0.1, help="Inertia Hyperparam")
-    parser.add_argument("--resample", type=int, default=40, help="Resample if swarm has not improved for this many updates. Negative for no resampling.")
 
     # Momentum
     parser.add_argument("--do-momentum", action="store_true", help="Whether to use momentum update")
@@ -141,7 +146,7 @@ def parse_args():
     parser.add_argument("--leak", type=float, default=0.1, help="Leak of SGA")
     parser.add_argument("--lr", type=float, default=1.0, help="Optional learning rate of SGA")
     parser.add_argument("--K", type=int, default=1, help="# Reference particles of SGA")
-    parser.add_argument("--normalize", type=int, default=0, help="Whether to normalize drift by h**normalize")
+    parser.add_argument("--normalize", type=int, default=2, help="Whether to normalize drift by h**normalize")
     parser.add_argument("--sub", type=int, default=1, help="Number of sub swarms (flat hierachy). Must divide --N evenly.")
 
     # CBO
@@ -160,8 +165,10 @@ def parse_args():
 
     # DIFF EVO
     parser.add_argument("--num-steps", type=int, default=1000, help="Number of steps (DiffEvo)")
-    parser.add_argument("--temperature", type=float, default=0.0, help="If != 0, use Energy Mapping with this temp")
-    parser.add_argument("--ddim-noise", type=float, default=1.0, help="Noise of generator sample (<=1)")
+    parser.add_argument("--temperature", type=float, default=0.0, help="If != 0, use Energy Mapping \
+            with this temp (DiffEvo)")
+    parser.add_argument("--ddim-noise", type=float, default=1.0, help="Noise of generator sample \
+            (<=1) (DiffEvo)")
     parser.add_argument("--l2", type=float, default=0.0, help="l2 penalty (DiffEvo)")
     parser.add_argument("--latent", type=int, default=0, help="Latent dim of Latent DiffEvo (ignored if 0)")
 
@@ -224,8 +231,8 @@ def main(args):
     device = torch.device("cuda" if args.gpu and torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    sizes = [28*28,100,10]
-    # sizes = [28*28,10]
+    # sizes = [28*28, args.hidden, 10]
+    sizes = [28*28, 10]
 
     if not args.gradient:
 
@@ -331,7 +338,7 @@ def main(args):
                 models,
                 device=device,
             )
-        elif opt == "dif":
+        elif opt == "evo":
             if args.temperature:
                 fitness_mapping = Energy(temperature=args.temperature, l2_factor=args.l2)
             else:

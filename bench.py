@@ -65,7 +65,7 @@ def parse_args():
             "pso",
             "sga",
             "pla",
-            "dif",
+            "evo",
         ],
         help="The 0th order Optim to use."
     )
@@ -83,7 +83,7 @@ def parse_args():
     parser.add_argument("--dim", type=int, default=100, help="Number of Dimensions")
     parser.add_argument("--iterations", type=float, default=5e3, help="Number of Steps to do.")
     parser.add_argument("--std", type=float, default=5., help="Standard Deviation of Init Normal")
-    parser.add_argument("--means", nargs="+", type=float, default=[85.], help="Init location for subswarm i is [means[i], ..., means[i]].")
+    parser.add_argument("--means", nargs="+", type=float, default=[100.], help="Init location for subswarm i is [means[i], ..., means[i]].")
 
     parser.add_argument("--neptune", action="store_true", help="Log to Neptune?")
 
@@ -102,7 +102,7 @@ def parse_args():
     # SGA
     parser.add_argument("--lr", type=float, default=1.0, help="Optional learning rate of SGA")
     parser.add_argument("--K", type=int, default=1, help="# Reference particles of SGA")
-    parser.add_argument("--normalize", type=int, default=0, help="Whether to normalize drift by h**norm")
+    parser.add_argument("--normalize", type=int, default=2, help="Whether to normalize drift by h**norm")
     parser.add_argument("--sub", type=int, default=1, help="Number of sub swarms (flat hierachy). Must divide --N evenly.")
     parser.add_argument("--leak", type=float, default=0.1, help="Leak slope of Leaky Relu in SGA")
 
@@ -213,12 +213,20 @@ def main(args):
                 models,
                 c1=args.c1,
                 c2=args.c2,
+                beta1=args.beta1,
+                beta2=args.beta2,
                 inertia=args.inertia,
-                parallel=not args.autograd
+                post_process=lambda cbo: rs(cbo),
+                parallel=not args.autograd,
+                do_momentum=args.do_momentum
             )
             run["parameters/c1"] = args.c1
             run["parameters/c2"] = args.c2
             run["parameters/inertia"] = args.inertia
+            run["parameters/resample"] = args.resample
+            run["parameters/do_momentum"] = args.do_momentum
+            run["parameters/beta1"] = args.beta1
+            run["parameters/beta2"] = args.beta2
 
         elif opt == "egi":
 
@@ -277,7 +285,7 @@ def main(args):
                 models,
                 parallel=not args.autograd
             )
-        elif opt == "dif":
+        elif opt == "evo":
             if args.temperature:
                 fitness_mapping = Energy(temperature=args.temperature, l2_factor=args.l2)
             else:

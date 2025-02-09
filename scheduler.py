@@ -46,6 +46,7 @@ class ExponentialLR(Scheduler):
 class CosineAnnealingLR(Scheduler):
     def __init__(self, optimizer, T_max, eta_min=0):
         super().__init__(optimizer)
+
         self.T_max = T_max
         self.eta_min = eta_min
         self.current_epoch = 0
