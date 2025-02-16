@@ -754,8 +754,10 @@ class GradSwarm:
         self.N = len(self.models)
 
         self.opts = [
-            opt_cls(**opt_params) for _ in range(self.N)
+            opt_cls(self.models[i], **opt_params) for i in range(self.N)
         ]
+
+        self.set_opt = lambda: opt_cls(self.model, **opt_params)
 
         self.device = device
 
@@ -770,30 +772,66 @@ class GradSwarm:
             loss_fn: Callable, # must have signature model_output -> loss
         ):
 
-        if self.t <= self.warmup:
+        def opt_step(opt, model, x, loss_fn):
+
+            opt.zero_grad()
+
+            output = model(x)
+            loss = loss_fn(output)
+
+            loss.backward()
+
+            opt.step()
+            return loss.item()
+
+        if self.t < self.warmup:
 
             losses = []
             for i in range(self.N):
                 opt = self.opts[i]
                 model = self.models[i]
 
-                opt.zero_grad()
-
-                output = model(x)
-                loss = loss_fn(output)
-
-                loss.backward()
-
-                opt.step()
-
-                losses.append(loss.item())
+                loss = opt_step(opt, model, x, loss_fn)
+                losses.append(loss)
 
             r = min(losses)
 
         else:
-            # calculate point that is closest to what current positions and gradients point to
+            if self.t == self.warmup:
+                # calculate point that is closest to what current positions and gradients point to
 
+                X = []
+                V = []
 
+                for i in range(self.N):
+
+                    model = self.models[i]
+                    opt = self.opts[i]
+
+                    x = _get_flat_params(model)
+                    v = _get_flat_adam_update_direction(opt[i])
+
+                    X.append(x)
+                    V.append(v)
+
+                X = torch.stack(X)
+                V = torch.stack(V)
+
+                q = solve_socp_cvxpy(X, V)
+
+                nn.utils.vector_to_parameters(
+                    q,
+                    self.model.parameters()
+                )
+
+                self.opt = self.set_opt()
+
+            r = opt_step(
+                self.opt,
+                self.model,
+                x,
+                loss_fn
+            )
 
         self.t += 1
         return r
@@ -852,11 +890,44 @@ def solve_socp_cvxpy(X_torch, V_torch):
 
     return q.value, r.value
 
+def _get_flat_params(model):
+    return torch.cat([p.detach().view(-1) for p in model.parameters()])
+
+
+def _get_flat_adam_update_direction(optimizer):
+    updates = []
+    for group in optimizer.param_groups:
+        lr = group['lr']
+        eps = group.get('eps', 1e-8)
+        beta1, beta2 = group['betas']
+        for p in group['params']:
+            if p.grad is None:
+                continue
+            state = optimizer.state[p]
+            # Make sure state has been initialized (after at least one optimizer.step())
+            if 'exp_avg' in state and 'exp_avg_sq' in state:
+                exp_avg = state['exp_avg']
+                exp_avg_sq = state['exp_avg_sq']
+                # Get the step count; default to 1 if not set.
+                step = state.get('step', 1)
+                # Compute bias corrections:
+                bias_correction1 = 1 - beta1 ** step
+                bias_correction2 = 1 - beta2 ** step
+                # Compute bias-corrected estimates
+                m_hat = exp_avg / bias_correction1
+                v_hat = exp_avg_sq / bias_correction2
+                # Adam update direction for this parameter
+                update = lr * m_hat / (torch.sqrt(v_hat) + eps)
+                updates.append(update.view(-1))
+            else:
+                # If state is not yet available, fall back to the raw gradient.
+                updates.append(p.grad.detach().view(-1))
+    return torch.cat(updates)
 
 
 
 def main(args):
-return 0
+    return 0
 
 if __name__ == "__main__":
 import sys
