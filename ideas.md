@@ -23,6 +23,11 @@
 TODO:
 1. Project Writeup: Intro, Def of SGA, CBO, PSO
 
+### TODO Gradswarm
+
+1. Get to run on MNIST
+2. Implement Spirals
+
 
 
 ## Jakob Infos

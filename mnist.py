@@ -7,7 +7,7 @@ from pprint import pprint
 
 from copy import deepcopy
 
-from swarm import Swarm, PSO, SwarmGradAccel, CBO, EGICBO, PlanarSwarm, DiffusionEvolution
+from swarm import Swarm, PSO, SwarmGradAccel, CBO, EGICBO, PlanarSwarm, DiffusionEvolution, GradSwarm
 from scheduler import *
 import resampling as rsmp
 
@@ -114,7 +114,8 @@ def parse_args():
             "pso",
             "sga",
             "pla",
-            "evo"
+            "evo",
+            "gsa"
         ],
         help="The 0th order Optim to use."
     )
@@ -171,6 +172,9 @@ def parse_args():
             (<=1) (DiffEvo)")
     parser.add_argument("--l2", type=float, default=0.0, help="l2 penalty (DiffEvo)")
     parser.add_argument("--latent", type=int, default=0, help="Latent dim of Latent DiffEvo (ignored if 0)")
+
+    # GRAD SWARM
+    parser.add_argument("--warmup", type=int, default=100, help="Number of warmup steps for GradSwarm")
 
     parser.add_argument("--timeit", type=int, default=-1, help="If > 0, avg execution time of optimizer.step() over this many executions")
 
@@ -353,6 +357,13 @@ def main(args):
                 latent_dim=args.latent if args.latent else None,
                 parallel=not args.autograd
             )
+        elif opt == "gsa":
+            optimizer0 = GradSwarm(
+                models,
+                device=device,
+                opt_args={"lr": args.lr},
+                warmup=args.warmup
+            )
         else:
             raise NotImplementedError(f"Optim={opt}")
 
@@ -380,7 +391,7 @@ def main(args):
 
         optimizer = torch.optim.Adam(
             model.parameters(),
-            lr=0.01,
+            lr=args.lr,
         )
 
     # Prep Data
@@ -389,7 +400,7 @@ def main(args):
     # Train the model
 
     # Dont compute gradients in case of Swarm optimizer
-    train_context = torch.no_grad if not (args.gradient or (args.switch >=0)) else contextlib.nullcontext
+    train_context = torch.no_grad if not (args.gradient or (args.switch >=0) or args.optim == "gsa") else contextlib.nullcontext
 
     if args.timeit > 0:
         time(optimizer, model, train_loader, args.timeit, device)

@@ -428,6 +428,12 @@ def main(args):
             run["parameters/resample"] = args.resample
             run["parameters/sub_swarms"] = args.sub_swarms
 
+        elif opt == "gsa":
+            optimizer0 = GradSwarm(
+                models,
+                device=device,
+                opt_args={"lr": args.lr},
+            )
         elif opt == "pla":
             optimizer = PlanarSwarm(
                 models,
@@ -454,7 +460,6 @@ def main(args):
     with train_context():
         # Run the training
         train_ppo(env, model, optimizer, num_episodes, update_interval, epochs, epsilon, gamma, device, args, run)
-
 
     if args.neptune:
         run.stop()

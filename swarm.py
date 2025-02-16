@@ -735,16 +735,17 @@ class PlanarSwarm(Swarm):
 
 class GradSwarm:
     """
-    Calculates gradients at each particle, then uses them to
-    arrive at estimate of point that all gradients point to using least squares
+    Calculates gradients at each particle using adam during a warmup phase,
+    then uses current positions and current adam updates to
+    arrive at estimate of point that all updates point to using SOCP.
     """
     def __init__(
             self,
             models: Iterable[nn.Module],
-            device= torch.device = "cpu",
-            warmup_steps: int = 100,
+            device: torch.device = "cpu",
+            warmup: int = 100,
             opt_cls = torch.optim.Adam,
-            opt_params = {"lr": 0.01},
+            opt_args = {"lr": 0.01},
         ):
 
         self.models = models
@@ -754,23 +755,25 @@ class GradSwarm:
         self.N = len(self.models)
 
         self.opts = [
-            opt_cls(self.models[i], **opt_params) for i in range(self.N)
+            opt_cls(self.models[i].parameters(), **opt_args) for i in range(self.N)
         ]
 
         self.set_opt = lambda: opt_cls(self.model, **opt_params)
 
         self.device = device
 
-        self.warmup = warmup_steps
+        self.warmup = warmup
         self.t = 0
-
 
     def step(
             self,
-            model: nn.Module,
+            _,
             x: torch.Tensor,
             loss_fn: Callable, # must have signature model_output -> loss
         ):
+        """
+        Note: Has same signature as Swarm.step, but ignores model argument
+        """
 
         def opt_step(opt, model, x, loss_fn):
 
@@ -782,22 +785,23 @@ class GradSwarm:
             loss.backward()
 
             opt.step()
-            return loss.item()
+            return loss
 
         if self.t < self.warmup:
 
             losses = []
             for i in range(self.N):
                 opt = self.opts[i]
-                model = self.models[i]
+                m = self.models[i]
 
-                loss = opt_step(opt, model, x, loss_fn)
+                loss = opt_step(opt, m, x, loss_fn)
                 losses.append(loss)
 
             r = min(losses)
 
         else:
             if self.t == self.warmup:
+                print(f"==== Approximating target point using SOCP ... ====")
                 # calculate point that is closest to what current positions and gradients point to
 
                 X = []
@@ -805,11 +809,13 @@ class GradSwarm:
 
                 for i in range(self.N):
 
-                    model = self.models[i]
+                    m = self.models[i]
                     opt = self.opts[i]
 
-                    x = _get_flat_params(model)
-                    v = _get_flat_adam_update_direction(opt[i])
+                    x = _get_flat_params(m)
+                    v = _get_flat_adam_update_direction(opt)
+                    # normalize v
+                    v /= torch.linalg.norm(v)
 
                     X.append(x)
                     V.append(v)
@@ -817,7 +823,7 @@ class GradSwarm:
                 X = torch.stack(X)
                 V = torch.stack(V)
 
-                q = solve_socp_cvxpy(X, V)
+                q = torch.Tensor(solve_socp_cvxpy(X, V)[0]).to(device=self.device)
 
                 nn.utils.vector_to_parameters(
                     q,
@@ -864,16 +870,17 @@ def solve_socp_cvxpy(X_torch, V_torch):
     r = cp.Variable()
 
     constraints = []
+
     for i in range(N):
         x_i = X[i]
         v_i = V[i]
 
-    # Directional constraint: (q - x_i)^T v_i >= 0
-    constraints.append((q- x_i)@v_i>=0)
+        # Directional constraint: (q - x_i)^T v_i >= 0
+        constraints.append((q- x_i)@v_i>=0)
 
-    # Orthogonal projection: (q - x_i) - (v_i^T (q - x_i)) * v_i
-    # Constraint: norm( (q - x_i) - (v_i^T (q - x_i)) * v_i ) <= r
-    constraints.append(cp.norm((q - x_i)- (v_i @ (q - x_i))* v_i)<=r)
+        # Orthogonal projection: (q - x_i) - (v_i^T (q - x_i)) * v_i
+        # Constraint: norm( (q - x_i) - (v_i^T (q - x_i)) * v_i ) <= r
+        constraints.append(cp.norm((q - x_i)- (v_i @ (q - x_i))* v_i)<=r)
 
     # Objective:
     # minimize
@@ -881,9 +888,11 @@ def solve_socp_cvxpy(X_torch, V_torch):
     objective = cp.Minimize(r)
 
     prob = cp.Problem(objective, constraints)
-    # solver='ECOS', 'SCS', 'MOSEK'
 
-    prob.solve(solver=cp.ECOS)
+    # solver = cp.ECOS, cp.SCS, cp.MOSEK
+    print(f"==== Calling SOCP ... ====")
+    prob.solve(solver=cp.SCS)
+    print(f"==== Solved! ====")
 
     if prob.status not in ['optimal','optimal_inaccurate']:
         raise ValueError("Optimization did not converge!")
@@ -930,7 +939,7 @@ def main(args):
     return 0
 
 if __name__ == "__main__":
-import sys
+    import sys
 
-main(sys.argv[1:])
+    main(sys.argv[1:])
 
