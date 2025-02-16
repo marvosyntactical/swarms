@@ -843,61 +843,75 @@ class GradSwarm:
         return r
 
 
-def solve_socp_cvxpy(X_torch, V_torch):
+def solve_socp_cvxpy_reduced(X_torch, V_torch):
     """
     Solve the SOCP:
-    minimize    r
-    subject to  ||(I - v_i v_i^T)(q - x_i)|| <= r   and   (q - x_i)^T v_i
-    >= 0, for all i.
+       minimize    r
+       subject to  ||(I - v_i v_i^T)(q - x_i)|| <= r   and   (q - x_i)^T v_i >= 0 for all i,
+    where q is restricted to lie in the affine subspace spanned by {x_i} and {v_i}.
+
+    We represent q as q = q0 + Bz, with q0 chosen as X[0] and B an orthonormal basis for
+    the span of {x_i - q0, v_i}.
 
     Args:
-        X_torch: PyTorch tensor of shape (N, d) for
-        starting points.
-        V_torch: PyTorch tensor of shape (N, d)
-        for unit direction vectors.
+        X_torch: PyTorch tensor of shape (N, d) for starting points.
+        V_torch: PyTorch tensor of shape (N, d) for unit direction vectors.
 
     Returns:
-    q_opt: Optimal point (numpy array of shape (d,))
-    r_opt: Optimal max distance (scalar)
+        q_opt: Optimal point in R^d (numpy array of shape (d,))
+        r_opt: Optimal maximum distance (scalar)
     """
-    # Convert tensors to numpy arrays
-    X = X_torch.detach().cpu().numpy()
-    V = V_torch.detach().cpu().numpy()
+    # Convert tensors to numpy arrays.
+    X = X_torch.detach().cpu().numpy()  # shape (N, d)
+    V = V_torch.detach().cpu().numpy()  # shape (N, d)
     N, d = X.shape
 
-    # Define optimization variables
-    q = cp.Variable(d)
+    # Choose an anchor point q0. Here, we simply pick the first point.
+    q0 = X[0]
+
+    # Construct the matrix whose columns are (x_i - q0) and v_i.
+    # Y will be of shape (d, 2N).
+    Y = np.hstack([ (X - q0).T, V.T ])
+
+    # Compute an orthonormal basis for the column space of Y using SVD.
+    U, S, _ = np.linalg.svd(Y, full_matrices=False)
+    tol = 1e-8
+    k = np.sum(S > tol)
+    B = U[:, :k]  # B is (d, k)
+
+    # We now express q as: q = q0 + B * z, where z is in R^k.
+    # Create CVXPY variable for z and scalar r.
+    z = cp.Variable(k)
     r = cp.Variable()
 
+    # Define q as an affine expression in z.
+    q_expr = q0 + B @ z  # CVXPY understands this since q0 and B are constants.
+
+    # Build the constraints.
     constraints = []
-
     for i in range(N):
-        x_i = X[i]
-        v_i = V[i]
+        xi = X[i]
+        vi = V[i]
+        # Directional constraint: (q - xi)^T vi >= 0
+        constraints.append( (q_expr - xi) @ vi >= 0 )
 
-        # Directional constraint: (q - x_i)^T v_i >= 0
-        constraints.append((q- x_i)@v_i>=0)
+        # Orthogonal distance constraint:
+        # Compute the projection of (q - xi) onto vi:  (q - xi)^T vi.
+        dot_val = (q_expr - xi) @ vi
+        # The orthogonal component is: (q - xi) - (dot_val)*vi.
+        constraints.append( cp.norm((q_expr - xi) - dot_val * vi) <= r )
 
-        # Orthogonal projection: (q - x_i) - (v_i^T (q - x_i)) * v_i
-        # Constraint: norm( (q - x_i) - (v_i^T (q - x_i)) * v_i ) <= r
-        constraints.append(cp.norm((q - x_i)- (v_i @ (q - x_i))* v_i)<=r)
-
-    # Objective:
-    # minimize
-    # r
+    # Objective: minimize r.
     objective = cp.Minimize(r)
-
     prob = cp.Problem(objective, constraints)
-
-    # solver = cp.ECOS, cp.SCS, cp.MOSEK
-    print(f"==== Calling SOCP ... ====")
     prob.solve(solver=cp.SCS)
-    print(f"==== Solved! ====")
 
-    if prob.status not in ['optimal','optimal_inaccurate']:
+    if prob.status not in ['optimal', 'optimal_inaccurate']:
         raise ValueError("Optimization did not converge!")
 
-    return q.value, r.value
+    # Compute optimal q in the original space.
+    q_opt = q0 + B @ z.value
+    return q_opt, r.value
 
 def _get_flat_params(model):
     return torch.cat([p.detach().view(-1) for p in model.parameters()])
