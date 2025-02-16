@@ -758,7 +758,7 @@ class GradSwarm:
             opt_cls(self.models[i].parameters(), **opt_args) for i in range(self.N)
         ]
 
-        self.set_opt = lambda: opt_cls(self.model, **opt_params)
+        self.set_opt = lambda: opt_cls(self.model.parameters(), **opt_args)
 
         self.device = device
 
@@ -812,18 +812,21 @@ class GradSwarm:
                     m = self.models[i]
                     opt = self.opts[i]
 
-                    x = _get_flat_params(m)
+                    p = _get_flat_params(m)
+                    # print("Parameter shape before:", p.shape)
+
                     v = _get_flat_adam_update_direction(opt)
                     # normalize v
                     v /= torch.linalg.norm(v)
 
-                    X.append(x)
+                    X.append(p)
                     V.append(v)
 
                 X = torch.stack(X)
                 V = torch.stack(V)
 
-                q = torch.Tensor(solve_socp_cvxpy(X, V)[0]).to(device=self.device)
+                q = torch.Tensor(solve_socp(X, V)[0]).to(device=self.device)
+                # print("Parameter shape after:", q.shape)
 
                 nn.utils.vector_to_parameters(
                     q,
@@ -831,6 +834,8 @@ class GradSwarm:
                 )
 
                 self.opt = self.set_opt()
+
+                # print("Shapes:", x.shape, self.model.linears[0].weight.shape)
 
             r = opt_step(
                 self.opt,
@@ -843,7 +848,7 @@ class GradSwarm:
         return r
 
 
-def solve_socp_cvxpy_reduced(X_torch, V_torch):
+def solve_socp(X_torch, V_torch):
     """
     Solve the SOCP:
        minimize    r
@@ -861,6 +866,7 @@ def solve_socp_cvxpy_reduced(X_torch, V_torch):
         q_opt: Optimal point in R^d (numpy array of shape (d,))
         r_opt: Optimal maximum distance (scalar)
     """
+
     # Convert tensors to numpy arrays.
     X = X_torch.detach().cpu().numpy()  # shape (N, d)
     V = V_torch.detach().cpu().numpy()  # shape (N, d)
@@ -877,6 +883,7 @@ def solve_socp_cvxpy_reduced(X_torch, V_torch):
     U, S, _ = np.linalg.svd(Y, full_matrices=False)
     tol = 1e-8
     k = np.sum(S > tol)
+    print(f"For a tolerance of {tol}, got a {k}-dim subspace.")
     B = U[:, :k]  # B is (d, k)
 
     # We now express q as: q = q0 + B * z, where z is in R^k.
@@ -892,6 +899,7 @@ def solve_socp_cvxpy_reduced(X_torch, V_torch):
     for i in range(N):
         xi = X[i]
         vi = V[i]
+
         # Directional constraint: (q - xi)^T vi >= 0
         constraints.append( (q_expr - xi) @ vi >= 0 )
 
@@ -904,7 +912,10 @@ def solve_socp_cvxpy_reduced(X_torch, V_torch):
     # Objective: minimize r.
     objective = cp.Minimize(r)
     prob = cp.Problem(objective, constraints)
+
+    print("Solving ...")
     prob.solve(solver=cp.SCS)
+    print("Solved!")
 
     if prob.status not in ['optimal', 'optimal_inaccurate']:
         raise ValueError("Optimization did not converge!")
