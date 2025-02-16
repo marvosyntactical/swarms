@@ -24,6 +24,9 @@ from diffevo.kde import *
 from diffevo.ddim import DDIMScheduler
 from diffevo.latent import RandomProjection
 
+# for grad swarm
+import cvxpy as cp
+
 
 # For Debugging
 f = lambda t: (t.isnan().sum()/t.nelement()).item()
@@ -730,12 +733,133 @@ class PlanarSwarm(Swarm):
         self.V = V
         self.X += V
 
+class GradSwarm:
+    """
+    Calculates gradients at each particle, then uses them to
+    arrive at estimate of point that all gradients point to using least squares
+    """
+    def __init__(
+            self,
+            models: Iterable[nn.Module],
+            device= torch.device = "cpu",
+            warmup_steps: int = 100,
+            opt_cls = torch.optim.Adam,
+            opt_params = {"lr": 0.01},
+        ):
+
+        self.models = models
+
+        self.model = deepcopy(models[0])
+
+        self.N = len(self.models)
+
+        self.opts = [
+            opt_cls(**opt_params) for _ in range(self.N)
+        ]
+
+        self.device = device
+
+        self.warmup = warmup_steps
+        self.t = 0
+
+
+    def step(
+            self,
+            model: nn.Module,
+            x: torch.Tensor,
+            loss_fn: Callable, # must have signature model_output -> loss
+        ):
+
+        if self.t <= self.warmup:
+
+            losses = []
+            for i in range(self.N):
+                opt = self.opts[i]
+                model = self.models[i]
+
+                opt.zero_grad()
+
+                output = model(x)
+                loss = loss_fn(output)
+
+                loss.backward()
+
+                opt.step()
+
+                losses.append(loss.item())
+
+            r = min(losses)
+
+        else:
+            # calculate point that is closest to what current positions and gradients point to
+
+
+
+        self.t += 1
+        return r
+
+
+def solve_socp_cvxpy(X_torch, V_torch):
+    """
+    Solve the SOCP:
+    minimize    r
+    subject to  ||(I - v_i v_i^T)(q - x_i)|| <= r   and   (q - x_i)^T v_i
+    >= 0, for all i.
+
+    Args:
+        X_torch: PyTorch tensor of shape (N, d) for
+        starting points.
+        V_torch: PyTorch tensor of shape (N, d)
+        for unit direction vectors.
+
+    Returns:
+    q_opt: Optimal point (numpy array of shape (d,))
+    r_opt: Optimal max distance (scalar)
+    """
+    # Convert tensors to numpy arrays
+    X = X_torch.detach().cpu().numpy()
+    V = V_torch.detach().cpu().numpy()
+    N, d = X.shape
+
+    # Define optimization variables
+    q = cp.Variable(d)
+    r = cp.Variable()
+
+    constraints = []
+    for i in range(N):
+        x_i = X[i]
+        v_i = V[i]
+
+    # Directional constraint: (q - x_i)^T v_i >= 0
+    constraints.append((q- x_i)@v_i>=0)
+
+    # Orthogonal projection: (q - x_i) - (v_i^T (q - x_i)) * v_i
+    # Constraint: norm( (q - x_i) - (v_i^T (q - x_i)) * v_i ) <= r
+    constraints.append(cp.norm((q - x_i)- (v_i @ (q - x_i))* v_i)<=r)
+
+    # Objective:
+    # minimize
+    # r
+    objective = cp.Minimize(r)
+
+    prob = cp.Problem(objective, constraints)
+    # solver='ECOS', 'SCS', 'MOSEK'
+
+    prob.solve(solver=cp.ECOS)
+
+    if prob.status not in ['optimal','optimal_inaccurate']:
+        raise ValueError("Optimization did not converge!")
+
+    return q.value, r.value
+
+
+
 
 def main(args):
-    return 0
+return 0
 
 if __name__ == "__main__":
-    import sys
+import sys
 
-    main(sys.argv[1:])
+main(sys.argv[1:])
 
