@@ -22,24 +22,24 @@ SGA is a zeroth-order, particle-based optimiser. It estimates a descent directio
 
 ### Notation
 
-Let $N$ be the number of particles, $f : \mathbb{R}^d \to \mathbb{R}$ the objective, and $X = (x_1, \ldots, x_N) \in \mathbb{R}^{N \times d}$ the swarm at iteration $t$. The hyperparameters are: the number of reference particles $K$, the leak slope $\alpha$ of the LeakyReLU, the normalisation exponent $p \in \{0, 1, 2\}$, learning rate $\eta$, momentum coefficients $\beta_1, \beta_2$, drift weight $c_1$, and noise scale $c_2$.
+Let $N$ be the number of particles, $f : \mathbb{R}^d \to \mathbb{R}$ the objective, and $X = (x_1, \ldots, x_N) \in \mathbb{R}^{N \times d}$ the swarm at iteration $t$. The hyperparameters are: the number of reference particles $K$, the leak slope $\alpha$ of the LeakyReLU, the normalisation exponent $p \in \lbrace 0, 1, 2 \rbrace$, learning rate $\eta$, momentum coefficients $\beta_1, \beta_2$, drift weight $c_1$, and noise scale $c_2$.
 
 ### Update rule
 
 At each step $t$:
 
-**1. Draw $K$ random reference assignments.** For each $k = 1, \ldots, K$, sample a permutation $\pi_k$ of $\{1, \ldots, N\}$ uniformly at random. Particle $i$'s $k$-th reference is $\pi_k(i)$.
+**1. Draw $K$ random reference assignments.** For each $k = 1, \ldots, K$, sample a permutation $\pi_k$ of $\lbrace 1, \ldots, N \rbrace$ uniformly at random. Particle $i$'s $k$-th reference is $\pi_k(i)$.
 
 **2. Compute the swarm-gradient surrogate.** For each particle $i$, accumulate the contribution of every reference,
 
 $$
-g_i \;=\; \frac{1}{K} \sum_{k=1}^{K} \, \phi_\alpha\!\bigl(f(x_i) - f(x_{\pi_k(i)})\bigr) \cdot \frac{x_{\pi_k(i)} - x_i}{\lVert x_{\pi_k(i)} - x_i \rVert^{p} + \varepsilon}
+g_i = \frac{1}{K} \sum_{k=1}^{K} \phi_\alpha\big(f(x_i) - f(x_{\pi_k(i)})\big) \cdot \frac{x_{\pi_k(i)} - x_i}{\| x_{\pi_k(i)} - x_i \|^{p} + \varepsilon}
 $$
 
 where $\phi_\alpha$ is the LeakyReLU with negative slope $\alpha$:
 
 $$
-\phi_\alpha(z) \;=\; \begin{cases} z & z \ge 0 \\ \alpha z & z < 0 \end{cases}
+\phi_\alpha(z) = \begin{cases} z & z \geq 0 \\\\ \alpha z & z < 0 \end{cases}
 $$
 
 The intuition is: if the reference particle has a *lower* loss ($f(x_{\pi_k(i)}) < f(x_i)$, so $z>0$), $g_i$ points fully toward it; if it has a *higher* loss ($z<0$), $\phi_\alpha$ damps the term by $\alpha$, so we still move slightly toward it (information about the local geometry is not discarded entirely, just down-weighted). The denominator with exponent $p$ controls how distance is treated: $p=0$ = raw difference, $p=1$ = unit direction, $p=2$ = inverse-distance scaling.
@@ -47,15 +47,15 @@ The intuition is: if the reference particle has a *lower* loss ($f(x_{\pi_k(i)})
 **3. Adam-style moments.** Track first and second moments of $g$:
 
 $$
-m_t = \beta_1 m_{t-1} + (1-\beta_1)\, g, \qquad v_t = \beta_2 v_{t-1} + (1-\beta_2)\, g^{\odot 2}
+m_t = \beta_1 m_{t-1} + (1 - \beta_1) g, \quad v_t = \beta_2 v_{t-1} + (1 - \beta_2) g^{\odot 2}
 $$
 
-with bias correction $\hat{m}_t = m_t / (1-\beta_1^t)$ and $\hat{v}_t = v_t / (1-\beta_2^t)$.
+with bias correction $\hat{m}_t = m_t / (1 - \beta_1^t)$ and $\hat{v}_t = v_t / (1 - \beta_2^t)$.
 
 **4. Particle update.** Add the bias-corrected, normalised step plus optional Gaussian exploration noise $\xi \sim \mathcal{N}(0, I)$:
 
 $$
-x_i \;\leftarrow\; x_i \;+\; \eta\, c_1 \cdot \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \varepsilon} \;+\; c_2 \, \xi
+x_i \leftarrow x_i + \eta \cdot c_1 \cdot \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \varepsilon} + c_2 \cdot \xi
 $$
 
 The non-momentum variant simply uses $x_i \leftarrow x_i + c_1 g_i + c_2 \xi$.
@@ -71,7 +71,7 @@ The non-momentum variant simply uses $x_i \leftarrow x_i + c_1 g_i + c_2 \xi$.
 `eval.py` runs all swarm optimisers on the standard benchmark functions (sphere, ackley, rastrigin, griewank, xsy4) and produces a comparison plot:
 
 ```bash
-python3 eval.py --N 40 --dim 30 --iterations 500 --runs 3 --out benchmark.png
+python3 eval.py --N 40 --dim 30 --iterations 500 --runs 5 --out benchmark.png
 ```
 
 **SGA outperforms PSO on rugged surfaces** (ackley, rastrigin, griewank). On smooth surfaces (sphere, xsy4) both methods reach the basin of the optimum, but PSO refines all the way to machine precision while SGA stops at a higher noise floor.
@@ -79,7 +79,7 @@ python3 eval.py --N 40 --dim 30 --iterations 500 --runs 3 --out benchmark.png
 The SGA configuration used here is $K=5$, $\beta_1=0.9$, $\beta_2=0.99$, $c_1=1$, $p=2$, with all three of $\eta$, $\alpha$ (LeakyReLU slope) and $c_2$ (Gaussian noise scale) annealed jointly via cosine,
 
 $$
-\eta(t),\, \alpha(t),\, c_2(t) \;=\; \bigl(\eta_0,\, \alpha_0,\, c_2^0\bigr) \cdot \tfrac{1}{2}\bigl(1 + \cos(\pi t / T)\bigr), \qquad \bigl(\eta_0, \alpha_0, c_2^0\bigr) = (1.0,\, 0.3,\, 0.1),
+\eta(t), \alpha(t), c_2(t) = (\eta_0, \alpha_0, c_2^0) \cdot \tfrac{1}{2} \big(1 + \cos(\pi t / T)\big), \quad (\eta_0, \alpha_0, c_2^0) = (1.0, 0.3, 0.1),
 $$
 
 so the swarm explores aggressively at $t=0$ (large LR, large LeakyReLU leak, isotropic Brownian kicks) and deterministically descends as $t \to T$. Comparison hyperparameters: PSO uses Clerc-Kennedy constriction ($w=0.7298$, $c_1=c_2=1.49445$); CBO uses $\lambda=1$, $\sigma=0.5$, $\Delta t=0.1$, $\alpha=30$ with anisotropic noise; EGICBO uses $\lambda=0.9$, $\sigma=0.5$, $\kappa=10^5$, $\alpha=30$ without Hessian extrapolation; DiffEvo uses identity fitness mapping with noise $1.0$.
