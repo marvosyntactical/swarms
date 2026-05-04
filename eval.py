@@ -7,6 +7,7 @@ Usage:
     python3 eval.py --runs 5 --iterations 800 --out benchmark.png
 """
 import argparse
+import math
 import random
 import time
 
@@ -16,6 +17,7 @@ import matplotlib.pyplot as plt
 
 from bench import ObjectiveFunction, ackley, rastrigin, xsy4, sphere, griewank
 from swarm import PSO, CBO, EGICBO, SwarmGradAccel, DiffusionEvolution
+from scheduler import CosineAnnealingLR, NoScheduler
 from diffevo.fitnessmapping import Identity
 
 
@@ -38,9 +40,11 @@ OPTIM_COLORS = {
 
 def make_optimizer(name, models, iterations, device):
     if name == "SGA":
+        # normalize=2 (cluster-amplifying) + cosine annealing of (lr, leak, c2)
+        # via SGAAnneal: explore early (high leak, c2 noise), exploit late.
         return SwarmGradAccel(
-            models, c1=1.0, c2=0.0, beta1=0.9, beta2=0.99, lr=1.0,
-            K=5, leak=0.1, do_momentum=True, normalize=2,
+            models, c1=1.0, c2=0.1, beta1=0.9, beta2=0.99, lr=1.0,
+            K=5, leak=0.3, do_momentum=True, normalize=2,
             sub_swarms=1, parallel=True, device=device,
         )
     if name == "PSO":
@@ -50,10 +54,10 @@ def make_optimizer(name, models, iterations, device):
             do_momentum=False, parallel=True, device=device,
         )
     if name == "CBO":
-        # CBXpy-style defaults for benchmark functions:
-        # alpha=100 (sharp consensus), sigma=sqrt(2) (anisotropic), dt=0.1
+        # softer consensus (temp=30) so the weighted mean is a real average
+        # rather than collapsing to argmin; sigma=0.5 keeps drift dominant
         return CBO(
-            models, lambda_=1.0, sigma=2.0**0.5, dt=0.1, temp=100.0,
+            models, lambda_=1.0, sigma=0.5, dt=0.1, temp=30.0,
             noise_type="component", parallel=True, device=device,
         )
     if name == "EGI":
@@ -70,6 +74,32 @@ def make_optimizer(name, models, iterations, device):
     raise ValueError(name)
 
 
+class SGAAnneal:
+    """Cosine-anneal lr, leak and c2 jointly from their initial values to 0."""
+    def __init__(self, opt, T_max):
+        self.opt = opt
+        self.T_max = T_max
+        self.lr0 = opt.lr
+        self.leak0 = opt.leak
+        self.c2_0 = opt.c2
+        self.t = 0
+
+    def step(self):
+        self.t += 1
+        if self.t > self.T_max:
+            return
+        f = 0.5 * (1.0 + math.cos(math.pi * self.t / self.T_max))
+        self.opt.lr = self.lr0 * f
+        self.opt.leak = self.leak0 * f
+        self.opt.c2 = self.c2_0 * f
+
+
+def make_scheduler(name, opt, iterations):
+    if name == "SGA":
+        return SGAAnneal(opt, T_max=iterations)
+    return NoScheduler(opt)
+
+
 def seed_all(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -83,6 +113,7 @@ def run_single(opt_name, fn, dim, N, iterations, std, mean, seed, device):
     mean_t = torch.tensor([mean] * dim)
     models = [ObjectiveFunction(fn, dim, mean_t, std) for _ in range(N)]
     opt = make_optimizer(opt_name, models, iterations, device)
+    sched = make_scheduler(opt_name, opt, iterations)
     model = opt.model
     dummy = torch.tensor([0.0])
 
@@ -91,6 +122,7 @@ def run_single(opt_name, fn, dim, N, iterations, std, mean, seed, device):
     with torch.no_grad():
         for t in range(iterations):
             loss = opt.step(model, dummy, lambda x: x).item()
+            sched.step()
             best = min(best, loss)
             curve[t] = best
     return curve

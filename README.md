@@ -74,7 +74,15 @@ The non-momentum variant simply uses $x_i \leftarrow x_i + c_1 g_i + c_2 \xi$.
 python3 eval.py --N 40 --dim 30 --iterations 500 --runs 3 --out benchmark.png
 ```
 
-PSO uses the canonical Clerc-Kennedy constriction setting ($w = 0.7298$, $c_1 = c_2 = 1.49445$); CBO uses CBXpy-style defaults ($\lambda = 1$, $\sigma = \sqrt{2}$, $\Delta t = 0.1$, $\alpha = 100$).
+**SGA outperforms PSO on rugged surfaces** (ackley, rastrigin, griewank). On smooth surfaces (sphere, xsy4) both methods reach the basin of the optimum, but PSO refines all the way to machine precision while SGA stops at a higher noise floor.
+
+The SGA configuration used here is $K=5$, $\beta_1=0.9$, $\beta_2=0.99$, $c_1=1$, $p=2$, with all three of $\eta$, $\alpha$ (LeakyReLU slope) and $c_2$ (Gaussian noise scale) annealed jointly via cosine,
+
+$$
+\eta(t),\, \alpha(t),\, c_2(t) \;=\; \bigl(\eta_0,\, \alpha_0,\, c_2^0\bigr) \cdot \tfrac{1}{2}\bigl(1 + \cos(\pi t / T)\bigr), \qquad \bigl(\eta_0, \alpha_0, c_2^0\bigr) = (1.0,\, 0.3,\, 0.1),
+$$
+
+so the swarm explores aggressively at $t=0$ (large LR, large LeakyReLU leak, isotropic Brownian kicks) and deterministically descends as $t \to T$. Comparison hyperparameters: PSO uses Clerc-Kennedy constriction ($w=0.7298$, $c_1=c_2=1.49445$); CBO uses $\lambda=1$, $\sigma=0.5$, $\Delta t=0.1$, $\alpha=30$ with anisotropic noise; EGICBO uses $\lambda=0.9$, $\sigma=0.5$, $\kappa=10^5$, $\alpha=30$ without Hessian extrapolation; DiffEvo uses identity fitness mapping with noise $1.0$.
 
 ![Benchmark results](benchmark.png)
 
