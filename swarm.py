@@ -59,7 +59,7 @@ class Swarm(optim.Optimizer):
 
         self.pp = post_process
 
-        self.pbests_x = self.X
+        self.pbests_x = self.X.clone()
         self.pbests_y = torch.Tensor([float("inf") for _ in range(self.N)]).to(self.X.device)
 
         # unnecessary:

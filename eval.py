@@ -44,13 +44,16 @@ def make_optimizer(name, models, iterations, device):
             sub_swarms=1, parallel=True, device=device,
         )
     if name == "PSO":
+        # Clerc-Kennedy constriction PSO: w=0.7298, c1=c2=1.49445
         return PSO(
-            models, c1=1.5, c2=0.5, inertia=0.5,
+            models, c1=1.49445, c2=1.49445, inertia=0.7298,
             do_momentum=False, parallel=True, device=device,
         )
     if name == "CBO":
+        # CBXpy-style defaults for benchmark functions:
+        # alpha=100 (sharp consensus), sigma=sqrt(2) (anisotropic), dt=0.1
         return CBO(
-            models, lambda_=1.0, sigma=0.5, dt=0.1, temp=30.0,
+            models, lambda_=1.0, sigma=2.0**0.5, dt=0.1, temp=100.0,
             noise_type="component", parallel=True, device=device,
         )
     if name == "EGI":
