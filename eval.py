@@ -29,6 +29,13 @@ OBJECTIVES = {
     "xsy4":      xsy4,
 }
 
+# Two categories, plotted as separate rows. Within each row the order
+# below is preserved.
+CATEGORIES = {
+    "Smooth": ["sphere", "xsy4"],
+    "Rugged": ["ackley", "rastrigin", "griewank"],
+}
+
 OPTIM_COLORS = {
     "SGA":     "#d62728",
     "PSO":     "#1f77b4",
@@ -154,33 +161,45 @@ def run_grid(args):
 
 
 def plot_grid(results, args):
-    fns = list(results.keys())
-    n = len(fns)
-    cols = min(3, n)
-    rows = (n + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(5.0 * cols, 3.6 * rows),
+    # Lay out two rows by category. Width is fixed at the larger row's size
+    # so columns line up; unused cells in the shorter row are hidden.
+    row_fns = [(cat, [fn for fn in fns if fn in results])
+               for cat, fns in CATEGORIES.items()]
+    cols = max(len(fns) for _, fns in row_fns)
+    rows = len(row_fns)
+
+    fig, axes = plt.subplots(rows, cols, figsize=(5.0 * cols, 3.8 * rows),
                              squeeze=False)
-    axes = axes.flatten()
 
-    for i, fn_name in enumerate(fns):
-        ax = axes[i]
-        for opt_name, curves in results[fn_name].items():
-            mean = curves.mean(axis=0)
-            std = curves.std(axis=0)
-            x = np.arange(curves.shape[1])
-            color = OPTIM_COLORS.get(opt_name, None)
-            ax.plot(x, mean, label=opt_name, color=color, linewidth=1.6)
-            ax.fill_between(x, mean - std, mean + std, alpha=0.15, color=color)
-        ax.set_title(fn_name)
-        ax.set_xlabel("iteration")
-        ax.set_ylabel("best loss")
-        ax.set_yscale("symlog", linthresh=1e-3)
-        ax.grid(True, which="both", alpha=0.25)
-        if i == 0:
-            ax.legend(fontsize=8, loc="upper right")
+    for r, (cat, fns) in enumerate(row_fns):
+        for c in range(cols):
+            ax = axes[r][c]
+            if c >= len(fns):
+                ax.set_visible(False)
+                continue
+            fn_name = fns[c]
+            for opt_name, curves in results[fn_name].items():
+                mean = curves.mean(axis=0)
+                std = curves.std(axis=0)
+                x = np.arange(curves.shape[1])
+                color = OPTIM_COLORS.get(opt_name, None)
+                ax.plot(x, mean, label=opt_name, color=color, linewidth=1.6)
+                ax.fill_between(x, mean - std, mean + std, alpha=0.15,
+                                color=color)
+            ax.set_title(fn_name)
+            ax.set_xlabel("iteration")
+            ax.set_ylabel("best loss")
+            ax.set_yscale("symlog", linthresh=1e-3)
+            ax.grid(True, which="both", alpha=0.25)
+            if r == 0 and c == 0:
+                ax.legend(fontsize=8, loc="upper right")
 
-    for j in range(n, len(axes)):
-        axes[j].set_visible(False)
+        # Row label on the leftmost axis of each row
+        axes[r][0].annotate(
+            cat, xy=(-0.22, 0.5), xycoords="axes fraction",
+            ha="center", va="center", rotation=90,
+            fontsize=12, fontweight="bold",
+        )
 
     fig.suptitle(
         f"Swarm optimisers on benchmark functions  "
